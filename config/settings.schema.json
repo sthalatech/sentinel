@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/sentinel-loop/sentinel-loop/settings.schema.json",
+  "$id": "https://github.com/sthalatech/sentinel/settings.schema.json",
   "title": "SentinelLoopSettings",
-  "description": "Configuration file shape for sentinel-loop.",
+  "description": "Configuration file shape for sentinel.",
   "type": "object",
   "properties": {
     "detector": { "$ref": "#/$defs/plugin" },

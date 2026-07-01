@@ -1,1 +1,1 @@
-"""CLI package for sentinel-loop."""
+"""CLI package for sentinel."""

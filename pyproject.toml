@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "sentinel-loop"
+name = "sentinel"
 version = "0.1.0"
 description = "A pluggable self-healing agent framework."
 readme = "README.md"

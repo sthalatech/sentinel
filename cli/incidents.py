@@ -1,4 +1,4 @@
-"""Incident management CLI for sentinel-loop."""
+"""Incident management CLI for sentinel."""
 
 from __future__ import annotations
 

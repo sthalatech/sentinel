@@ -1,4 +1,4 @@
-# sentinel-loop
+# sentinel
 
 A pluggable, self-healing agent framework for Python. Sentinel Loop runs on a
 timer: detect incidents, attempt remediation, verify the fix, and escalate when
@@ -22,7 +22,7 @@ changing the engine.
 ## Repo layout
 
 ```
-sentinel-loop/
+sentinel/
 ├── core/                  # Engine, incident model, trust, audit
 │   ├── engine.py
 │   ├── incident.py
@@ -119,4 +119,4 @@ run the contract tests. See `docs/PLUGIN_GUIDE.md` for the full guide and
 
 MIT — see `LICENSE`.
 
-![CI](https://github.com/sentinel-loop/sentinel-loop/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/sthalatech/sentinel/actions/workflows/ci.yml/badge.svg)

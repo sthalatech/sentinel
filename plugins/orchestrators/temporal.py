@@ -7,13 +7,13 @@ from interfaces.orchestrator import Orchestrator
 
 
 class TemporalOrchestrator(Orchestrator):
-    """Run sentinel-loop as a Temporal workflow with signal-based wakeups."""
+    """Run sentinel as a Temporal workflow with signal-based wakeups."""
 
     def __init__(
         self,
         address: str,
         namespace: str = "default",
-        workflow_id: str = "sentinel-loop",
+        workflow_id: str = "sentinel",
         task_queue: str = "sentinel",
     ) -> None:
         self.address = address

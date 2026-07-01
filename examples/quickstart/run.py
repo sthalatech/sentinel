@@ -1,4 +1,4 @@
-"""One-command quickstart for sentinel-loop.
+"""One-command quickstart for sentinel.
 
 Run with no arguments:
 

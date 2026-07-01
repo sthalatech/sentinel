@@ -1,4 +1,4 @@
-"""Configuration loader and default wiring for sentinel-loop."""
+"""Configuration loader and default wiring for sentinel."""
 
 from __future__ import annotations
 

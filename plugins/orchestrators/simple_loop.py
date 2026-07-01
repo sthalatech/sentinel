@@ -1,4 +1,4 @@
-"""Timer-based orchestrator with exponential backoff for sentinel-loop."""
+"""Timer-based orchestrator with exponential backoff for sentinel."""
 
 from __future__ import annotations
 
