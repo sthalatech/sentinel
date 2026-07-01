@@ -18,11 +18,11 @@ from __future__ import annotations
 import pathlib
 import sys
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
-from config.settings import build_default_config
-from core.engine import SentinelConfig, run_once
-from core.incident import IncidentStatus
+from sentinel.config import build_default_config
+from sentinel.core.engine import SentinelConfig, run_once
+from sentinel.core.incident import IncidentStatus
 
 
 def _summarize_report(cfg: SentinelConfig) -> str:

@@ -8,9 +8,9 @@ import threading
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from core.incident import EscalationEvent, Incident, IncidentStatus
-from plugins.notifiers.slack import SlackNotifier
-from plugins.secret_providers.env_provider import EnvSecretProvider
+from sentinel.core.incident import EscalationEvent, Incident, IncidentStatus
+from sentinel.plugins.notifiers.slack import SlackNotifier
+from sentinel.plugins.secret_providers.env_provider import EnvSecretProvider
 
 
 class FakeSlackHandler(BaseHTTPRequestHandler):

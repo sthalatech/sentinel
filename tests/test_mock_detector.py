@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from core.incident import Incident, IncidentStatus
-from plugins.detectors.mock_example import MockDetector, default_mock_incident
+from sentinel.core.incident import Incident, IncidentStatus
+from sentinel.plugins.detectors.mock_example import MockDetector, default_mock_incident
 
 
 def test_returns_configured_incidents() -> None:

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from core.incident import Decision
-from plugins.enforcers.noop import NoopEnforcer
+from sentinel.core.incident import Decision
+from sentinel.plugins.enforcers.noop import NoopEnforcer
 
 
 def test_noop_enforcer_always_allow() -> None:

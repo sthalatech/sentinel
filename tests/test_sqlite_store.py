@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from core.audit import AuditEntry
-from core.incident import Incident, IncidentStatus
-from plugins.state_stores.sqlite_store import SqliteAuditSink, SqliteStateStore
+from sentinel.core.audit import AuditEntry
+from sentinel.core.incident import Incident, IncidentStatus
+from sentinel.plugins.state_stores.sqlite_store import SqliteAuditSink, SqliteStateStore
 
 
 def make_incident(idx: int, detected_at: datetime) -> Incident:

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from core.incident import Decision, Incident, IncidentStatus, Result
-from plugins.remediators.mock import MockRemediator
+from sentinel.core.incident import Decision, Incident, IncidentStatus, Result
+from sentinel.plugins.remediators.mock import MockRemediator
 
 
 def make_incident() -> Incident:

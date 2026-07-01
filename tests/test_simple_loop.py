@@ -5,8 +5,8 @@ from __future__ import annotations
 from threading import Event
 from unittest.mock import MagicMock
 
-from core.engine import SentinelConfig
-from plugins.orchestrators.simple_loop import SimpleLoopOrchestrator
+from sentinel.core.engine import SentinelConfig
+from sentinel.plugins.orchestrators.simple_loop import SimpleLoopOrchestrator
 
 
 def make_cfg() -> SentinelConfig:
@@ -28,7 +28,7 @@ def test_run_once_is_called(mocker) -> None:
     """schedule should invoke run_once at least once."""
     cfg = make_cfg()
     cfg.detector.detect.return_value = []
-    run_once_mock = mocker.patch("plugins.orchestrators.simple_loop.run_once")
+    run_once_mock = mocker.patch("sentinel.plugins.orchestrators.simple_loop.run_once")
     loop = SimpleLoopOrchestrator(interval=0.01)
     loop.schedule(cfg)
     run_once_mock.assert_called_once_with(cfg)
@@ -39,7 +39,7 @@ def test_stop_works(mocker) -> None:
     """stop should prevent further scheduled ticks."""
     cfg = make_cfg()
     cfg.detector.detect.return_value = []
-    run_once_mock = mocker.patch("plugins.orchestrators.simple_loop.run_once")
+    run_once_mock = mocker.patch("sentinel.plugins.orchestrators.simple_loop.run_once")
     loop = SimpleLoopOrchestrator(interval=0.01)
     loop.schedule(cfg)
     loop.stop()

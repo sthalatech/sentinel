@@ -65,9 +65,9 @@ keyword arguments. The shape is defined in `config/settings.schema.json`.
     "kwargs": {"max_age_hours": 24}
   },
   "notifier": {
-    "path": "plugins.notifiers.slack.SlackNotifier",
+    "path": "sentinel.plugins.notifiers.slack.SlackNotifier",
     "kwargs": {
-      "secret_provider": {"path": "plugins.secret_providers.env_provider.EnvSecretProvider"},
+      "secret_provider": {"path": "sentinel.plugins.secret_providers.env_provider.EnvSecretProvider"},
       "webhook_env": "SLACK_WEBHOOK_URL"
     }
   }

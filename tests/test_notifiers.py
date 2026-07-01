@@ -7,9 +7,9 @@ import threading
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from core.incident import EscalationEvent, Incident, IncidentStatus
-from plugins.notifiers.stdout import StdoutNotifier
-from plugins.notifiers.webhook import WebhookNotifier
+from sentinel.core.incident import EscalationEvent, Incident, IncidentStatus
+from sentinel.plugins.notifiers.stdout import StdoutNotifier
+from sentinel.plugins.notifiers.webhook import WebhookNotifier
 
 
 def make_event() -> EscalationEvent:

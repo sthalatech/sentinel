@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import pytest
 
-from plugins.detectors.data_reconciliation import DataReconciliationDetector
-from plugins.detectors.temporal_workflow import TemporalWorkflowDetector
-from plugins.enforcers.agt import AGTEnforcer
-from plugins.issue_trackers.jira import JiraIssueTracker
-from plugins.issue_trackers.linear import LinearIssueTracker
-from plugins.orchestrators.temporal import TemporalOrchestrator
-from plugins.remediators.claude_agent_sdk import ClaudeAgentRemediator
-from plugins.remediators.human_manual import HumanManualRemediator
-from plugins.remediators.shelley import ShelleyRemediator
-from plugins.state_stores.postgres_store import PostgresStateStore
+from sentinel.plugins.detectors.data_reconciliation import DataReconciliationDetector
+from sentinel.plugins.detectors.temporal_workflow import TemporalWorkflowDetector
+from sentinel.plugins.enforcers.agt import AGTEnforcer
+from sentinel.plugins.issue_trackers.jira import JiraIssueTracker
+from sentinel.plugins.issue_trackers.linear import LinearIssueTracker
+from sentinel.plugins.orchestrators.temporal import TemporalOrchestrator
+from sentinel.plugins.remediators.claude_agent_sdk import ClaudeAgentRemediator
+from sentinel.plugins.remediators.human_manual import HumanManualRemediator
+from sentinel.plugins.remediators.shelley import ShelleyRemediator
+from sentinel.plugins.state_stores.postgres_store import PostgresStateStore
 
 
 def test_detector_protocol_methods() -> None:

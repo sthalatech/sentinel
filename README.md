@@ -23,30 +23,31 @@ changing the engine.
 
 ```
 sentinel/
-├── core/                  # Engine, incident model, trust, audit
-│   ├── engine.py
-│   ├── incident.py
-│   ├── trust.py
-│   └── audit.py
-├── interfaces/            # Nine one-method Protocols
-│   ├── detector.py
-│   ├── remediator.py
-│   ├── verifier.py
-│   ├── enforcer.py
-│   ├── notifier.py
-│   ├── issue_tracker.py
-│   ├── state_store.py
-│   ├── secret_provider.py
-│   └── orchestrator.py
-├── plugins/               # Core plugins (sqlite, stdout, mock, env secrets)
-├── vendors/               # Vendor-specific integrations (GitHub, Slack, ...)
-├── cli/                   # `sentinel` command-line interface
-│   └── incidents.py
-├── examples/quickstart/   # One-command demo
-├── config/                # Settings loader, schema, and .env.example
+├── src/sentinel/           # Installable package: `import sentinel`
+│   ├── core/              # Engine, incident model, trust, audit
+│   │   ├── engine.py
+│   │   ├── incident.py
+│   │   ├── trust.py
+│   │   └── audit.py
+│   ├── interfaces/        # Nine one-method Protocols
+│   │   ├── detector.py
+│   │   ├── remediator.py
+│   │   ├── verifier.py
+│   │   ├── enforcer.py
+│   │   ├── notifier.py
+│   │   ├── issue_tracker.py
+│   │   ├── state_store.py
+│   │   ├── secret_provider.py
+│   │   └── orchestrator.py
+│   ├── plugins/          # All plugin implementations (defaults + vendor skeletons)
+│   ├── cli/              # `sentinel` command-line interface
+│   └── config.py         # Settings loader + default wiring
+├── config/                # Data: settings.schema.json and .env.example
+├── examples/quickstart/   # One-command demo (no deps, no secrets)
 ├── docs/                  # PLUGIN_GUIDE.md and SECURITY.md
 ├── governance/            # Trust ladder and policy examples
-└── tests/                 # Contract tests
+├── tests/                 # Contract + plugin tests
+└── pyproject.toml         # `pip install -e .` exposes the `sentinel` command
 ```
 
 ## Quickstart
@@ -58,19 +59,26 @@ python examples/quickstart/run.py
 This runs the engine once with mock plugins and an in-memory SQLite store, then
 prints how many incidents were detected, remediated, and resolved.
 
+To install the package and use the CLI:
+
+```bash
+pip install -e .
+sentinel incidents list
+```
+
 ## The nine interfaces
 
 | Interface | File | One-line job |
 |-----------|------|--------------|
-| Detector | `interfaces/detector.py` | Find problems. |
-| Remediator | `interfaces/remediator.py` | Fix one incident. |
-| Verifier | `interfaces/verifier.py` | Confirm the fix. |
-| Enforcer | `interfaces/enforcer.py` | Authorize tool actions. |
-| Notifier | `interfaces/notifier.py` | Escalate to humans. |
-| IssueTracker | `interfaces/issue_tracker.py` | Mirror lifecycle externally. |
-| StateStore | `interfaces/state_store.py` | Persist incidents. |
-| SecretProvider | `interfaces/secret_provider.py` | Resolve secrets. |
-| Orchestrator | `interfaces/orchestrator.py` | Run on a schedule. |
+| Detector | `src/sentinel/interfaces/detector.py` | Find problems. |
+| Remediator | `src/sentinel/interfaces/remediator.py` | Fix one incident. |
+| Verifier | `src/sentinel/interfaces/verifier.py` | Confirm the fix. |
+| Enforcer | `src/sentinel/interfaces/enforcer.py` | Authorize tool actions. |
+| Notifier | `src/sentinel/interfaces/notifier.py` | Escalate to humans. |
+| IssueTracker | `src/sentinel/interfaces/issue_tracker.py` | Mirror lifecycle externally. |
+| StateStore | `src/sentinel/interfaces/state_store.py` | Persist incidents. |
+| SecretProvider | `src/sentinel/interfaces/secret_provider.py` | Resolve secrets. |
+| Orchestrator | `src/sentinel/interfaces/orchestrator.py` | Run on a schedule. |
 
 ## Status flow
 

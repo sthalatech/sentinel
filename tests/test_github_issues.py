@@ -10,9 +10,9 @@ from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
-from core.incident import Incident, IncidentStatus
-from plugins.issue_trackers.github_issues import GitHubIssues
-from plugins.secret_providers.env_provider import EnvSecretProvider
+from sentinel.core.incident import Incident, IncidentStatus
+from sentinel.plugins.issue_trackers.github_issues import GitHubIssues
+from sentinel.plugins.secret_providers.env_provider import EnvSecretProvider
 
 
 class FakeGitHubHandler(BaseHTTPRequestHandler):
