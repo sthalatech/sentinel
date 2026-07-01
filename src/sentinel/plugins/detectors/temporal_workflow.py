@@ -13,7 +13,7 @@ class TemporalWorkflowDetector(Detector):
         self,
         address: str,
         namespace: str = "default",
-        task_queue: str = "fsil-sync",
+        task_queue: str = "default",
         workflow_ids: list[str] | None = None,
     ) -> None:
         self.address = address
