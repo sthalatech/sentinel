@@ -130,6 +130,13 @@ def _add_id_only(
     return parser
 
 
+def _handle_trust_reset(args: argparse.Namespace) -> None:
+    """Reset the global trust level to a chosen level with a reason."""
+    cfg = _load_config(args.config)
+    cfg.trust.reset(args.level, args.reason, actor="human-cli")
+    print(f"trust reset to {args.level}")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the argparse parser with the incidents subcommand tree."""
     parser = argparse.ArgumentParser(prog="sentinel", description="Sentinel Loop CLI")
@@ -157,6 +164,13 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_id_only(sub, "show", "Show full detail for an incident.").set_defaults(
         handler=_handle_show
     )
+
+    trust = top.add_parser("trust", help="Manage global trust level.")
+    trust_sub = trust.add_subparsers(dest="trust_command", required=True)
+    reset = trust_sub.add_parser("reset", help="Reset the global trust level.")
+    reset.add_argument("level", help="Target trust level, e.g. A4.")
+    reset.add_argument("--reason", required=True)
+    reset.set_defaults(handler=_handle_trust_reset)
 
     return parser
 

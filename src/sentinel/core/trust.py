@@ -11,7 +11,7 @@ DEFAULT_LEVEL = "A4"
 
 
 class TrustManager:
-    """Holds one global trust level; demotes it on critical failures."""
+    """Holds one global trust level; demotes on failures, resets on review."""
 
     def __init__(
         self, state_store: TrustStore, audit: AuditLog, level: str = DEFAULT_LEVEL
@@ -37,6 +37,12 @@ class TrustManager:
         self._level = f"A{new_num}"
         self._store.set_trust(self._level)
         self._audit.record_demotion(self._level, reason)
+
+    def reset(self, level: str, reason: str, actor: str = "human-cli") -> None:
+        """Set trust to an explicit level after human review."""
+        self._level = level
+        self._store.set_trust(level)
+        self._audit.record_trust_reset(level, reason, actor)
 
 
 class TrustStore(Protocol):
