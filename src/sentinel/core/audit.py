@@ -17,6 +17,9 @@ class AuditSink(Protocol):
     def append(self, entry: AuditEntry) -> None:
         """Persist one audit entry in order."""
 
+    def last_entry(self) -> AuditEntry | None:
+        """Return the most recently appended entry, or None if empty."""
+
 
 @dataclass
 class AuditEntry:
@@ -63,8 +66,13 @@ class AuditLog:
 
     def __init__(self, sink: AuditSink) -> None:
         self._sink = sink
-        self._seq = 0
-        self._prev = "0" * 64
+        last = sink.last_entry()
+        if last is None:
+            self._seq = 0
+            self._prev = "0" * 64
+        else:
+            self._seq = last.seq
+            self._prev = last.hash
 
     def _next(
         self, incident_id: str, kind: str, actor: str, payload: dict[str, object]
@@ -102,5 +110,11 @@ class AuditLog:
         entry = self._next(
             "trust", "demotion", "engine", {"new_level": new_level, "reason": reason}
         )
+        self._sink.append(entry)
+        return entry
+
+    def record_trust_reset(self, new_level: str, reason: str, actor: str) -> AuditEntry:
+        """Record an explicit trust reset to a chosen level."""
+        entry = self._next("trust", "reset", actor, {"new_level": new_level, "reason": reason})
         self._sink.append(entry)
         return entry

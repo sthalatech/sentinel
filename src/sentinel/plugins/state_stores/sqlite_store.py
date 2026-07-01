@@ -94,6 +94,25 @@ class SqliteAuditSink:
                 ),
             )
 
+    def last_entry(self) -> AuditEntry | None:
+        """Return the most recently appended audit entry, or None if empty."""
+        row = self._store._conn.execute(
+            "SELECT seq, ts, incident_id, kind, actor, payload, prev_hash, hash "
+            "FROM audit ORDER BY seq DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        return AuditEntry(
+            seq=row[0],
+            ts=row[1],
+            incident_id=row[2],
+            kind=row[3],
+            actor=row[4],
+            payload=json.loads(row[5]),
+            prev_hash=row[6],
+            hash=row[7],
+        )
+
 
 def _encode(incident: Incident) -> str:
     """Serialize an incident to JSON with enum/datetime handling."""
