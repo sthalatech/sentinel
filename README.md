@@ -39,7 +39,15 @@ sentinel/
 │   │   ├── state_store.py
 │   │   ├── secret_provider.py
 │   │   └── orchestrator.py
-│   ├── plugins/          # All plugin implementations (defaults + vendor skeletons)
+│   ├── plugins/          # Plugin implementations (one file per plugin)
+│   │   ├── detectors/        # mock, temporal, data_reconciliation
+│   │   ├── remediators/      # mock, shelley, claude_agent_sdk, human_manual
+│   │   ├── enforcers/        # noop, agt
+│   │   ├── notifiers/        # stdout, webhook, slack
+│   │   ├── issue_trackers/   # github_issues, linear, jira
+│   │   ├── state_stores/     # sqlite_store, postgres_store
+│   │   ├── orchestrators/    # simple_loop, temporal
+│   │   └── secret_providers/ # env_provider
 │   ├── cli/              # `sentinel` command-line interface
 │   └── config.py         # Settings loader + default wiring
 ├── config/                # Data: settings.schema.json and .env.example
@@ -98,24 +106,28 @@ reopens them through the single write path.
 
 ```bash
 # List incidents
-python -m cli incidents list
+sentinel incidents list
 
 # Show detail
-python -m cli incidents show mock-0
+sentinel incidents show mock-0
 
 # Pause and reopen
-python -m cli incidents pause mock-0 --reason "waiting on upstream"
-python -m cli incidents reopen mock-0 --reason "upstream is back"
+sentinel incidents pause mock-0 --reason "waiting on upstream"
+sentinel incidents reopen mock-0 --reason "upstream is back"
 
 # Print conversation link
-python -m cli incidents open mock-0
+sentinel incidents open mock-0
 
 # Soft-pause alias
-python -m cli incidents deprioritize mock-0 --reason "not urgent"
+sentinel incidents deprioritize mock-0 --reason "not urgent"
+
+# Reset global trust after human review
+sentinel trust reset A4 --reason "post-incident review complete"
 ```
 
-The CLI uses only `config.settings`, `core.engine`, and `core.incident` — it
-never imports the agent or vendor plugins directly.
+The CLI uses only `sentinel.config`, `sentinel.core.engine`, and
+`sentinel.core.incident` — it never imports the agent or vendor plugins
+directly.
 
 ## Add a plugin
 
