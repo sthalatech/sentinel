@@ -49,4 +49,3 @@ class TrustStore(Protocol):
     def get_trust(self) -> str:
         """Return the stored global trust level."""
         ...
-

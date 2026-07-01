@@ -33,7 +33,13 @@ class AuditEntry:
 
 
 def _hash_entry(
-    seq: int, ts: str, incident_id: str, kind: str, actor: str, payload: dict[str, object], prev_hash: str
+    seq: int,
+    ts: str,
+    incident_id: str,
+    kind: str,
+    actor: str,
+    payload: dict[str, object],
+    prev_hash: str,
 ) -> str:
     """Return sha256 over the entry's canonical fields."""
     blob = json.dumps(
@@ -60,7 +66,9 @@ class AuditLog:
         self._seq = 0
         self._prev = "0" * 64
 
-    def _next(self, incident_id: str, kind: str, actor: str, payload: dict[str, object]) -> AuditEntry:
+    def _next(
+        self, incident_id: str, kind: str, actor: str, payload: dict[str, object]
+    ) -> AuditEntry:
         self._seq += 1
         ts = datetime.now(UTC).isoformat()
         h = _hash_entry(self._seq, ts, incident_id, kind, actor, payload, self._prev)

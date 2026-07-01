@@ -1,0 +1,10 @@
+title = "Sentinel Loop gitleaks config"
+
+[extend]
+path = "default"
+
+[allowlist]
+description = "Allow the example env file, which contains only variable names."
+paths = [
+  '''config/.env.example''',
+]

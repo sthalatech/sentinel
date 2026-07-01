@@ -1,0 +1,55 @@
+{
+  "trust_levels": {
+    "A4": {
+      "description": "Fully autonomous routine remediation.",
+      "allowed_actions": [
+        "restart_workflow",
+        "reconcile_table_write",
+        "clear_cache",
+        "retry_webhook"
+      ],
+      "require_approval_for": [],
+      "worst_case_action": "restart_workflow",
+      "demotion": "global"
+    },
+    "A3": {
+      "description": "Autonomous with broader tool access and logs review.",
+      "allowed_actions": [
+        "restart_workflow",
+        "reconcile_table_write",
+        "clear_cache",
+        "retry_webhook",
+        "scale_resource",
+        "roll_back_deployment"
+      ],
+      "require_approval_for": [
+        "roll_back_deployment"
+      ],
+      "worst_case_action": "roll_back_deployment",
+      "demotion": "global"
+    },
+    "A2": {
+      "description": "Human approval required for impactful actions.",
+      "allowed_actions": [
+        "restart_workflow",
+        "reconcile_table_write",
+        "clear_cache",
+        "retry_webhook"
+      ],
+      "require_approval_for": [
+        "scale_resource",
+        "roll_back_deployment",
+        "terminate_process"
+      ],
+      "worst_case_action": "terminate_process",
+      "demotion": "global"
+    },
+    "A1": {
+      "description": "Lockdown: escalate only, no autonomous remediation.",
+      "allowed_actions": [],
+      "require_approval_for": [],
+      "worst_case_action": "notify_human",
+      "demotion": "global"
+    }
+  }
+}

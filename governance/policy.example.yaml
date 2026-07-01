@@ -1,0 +1,42 @@
+# Sentinel Loop example policy.
+# This is an illustration; copy it, tune it to your environment, and reference
+# it from your live config via the AGT_POLICY_PATH environment variable.
+#
+# The policy references trust levels defined in governance/agentaz.example.json.
+# When global trust drops to A1 the loop enters lockdown and only escalates.
+
+policy:
+  version: "1.0"
+  trust_ladder: "governance/agentaz.example.json"
+
+  # Actions the active remediator may attempt without extra approval.
+  tool_allowlist:
+    - restart_workflow      # re-trigger a failed Temporal / GitHub Actions run
+    - reconcile_table_write # idempotently fix a mismatched row
+    - clear_cache           # warm caches can be rebuilt cheaply
+    - retry_webhook         # transient delivery failures
+
+  # Actions that always require explicit human approval, regardless of trust.
+  require_approval:
+    - terminate_process
+    - roll_back_deployment
+    - delete_resource
+
+  # Trust-level-specific approval gates.
+  # Anything listed here is blocked unless approved by a human in the tracker.
+  approval_gates:
+    A4: []                                    # routine autonomy
+    A3: [roll_back_deployment]                # broader tools need a second look
+    A2: [scale_resource, terminate_process]  # impactful actions need approval
+    A1: []                                    # lockdown: no tools run
+
+  # How the global trust level reacts to unresolved incidents.
+  demotion:
+    mode: "global"        # one shared trust level across all incidents
+    step: 1               # drop one level per unresolved incident
+    floor: "A1"           # never demote below lockdown
+
+  # Escalation rules for incidents that cannot be auto-resolved.
+  escalation:
+    max_attempts: 3
+    on_lockdown: notify_human_everywhere
