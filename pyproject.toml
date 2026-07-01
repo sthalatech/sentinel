@@ -30,6 +30,7 @@ github = []
 postgres = ["psycopg[binary]"]
 slack = ["slack-sdk"]
 temporal = ["temporalio"]
+agt = ["pyyaml"]
 dev = [
     "ruff",
     "black",

@@ -36,9 +36,9 @@ def test_orchestrator_protocol_methods() -> None:
 
 
 def test_enforcer_protocol_methods() -> None:
-    """Enforcers expose authorize."""
+    """Enforcers expose authorize; AGTEnforcer fails loud without a trust store."""
     assert hasattr(AGTEnforcer, "authorize")
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(RuntimeError):
         AGTEnforcer().authorize("tool.action")
 
 
