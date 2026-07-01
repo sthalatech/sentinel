@@ -10,7 +10,7 @@ from core.incident import Incident, Result
 class Remediator(Protocol):
     """A remediator attempts to fix one incident."""
 
-    def remediate(self, incident: Incident, enforcer: "Enforcer") -> Result:
+    def remediate(self, incident: Incident, enforcer: Enforcer) -> Result:
         """Attempt remediation; the enforcer gates each tool call."""
         ...
 

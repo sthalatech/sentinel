@@ -6,9 +6,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from core.audit import AuditLog
-from core.incident import EscalationEvent, Incident, IncidentStatus, Result
+from core.incident import EscalationEvent, IncidentStatus
 
 if TYPE_CHECKING:
+    from core.trust import TrustManager
     from interfaces.detector import Detector
     from interfaces.enforcer import Enforcer
     from interfaces.issue_tracker import IssueTracker
@@ -16,21 +17,20 @@ if TYPE_CHECKING:
     from interfaces.remediator import Remediator
     from interfaces.state_store import StateStore
     from interfaces.verifier import Verifier
-    from core.trust import TrustManager
 
 
 @dataclass
 class SentinelConfig:
     """Wiring of all plugins for one run of the loop."""
 
-    detector: "Detector"
-    remediator: "Remediator"
-    verifier: "Verifier"
-    enforcer: "Enforcer"
-    notifier: "Notifier"
-    issue_tracker: "IssueTracker"
-    state_store: "StateStore"
-    trust: "TrustManager"
+    detector: Detector
+    remediator: Remediator
+    verifier: Verifier
+    enforcer: Enforcer
+    notifier: Notifier
+    issue_tracker: IssueTracker
+    state_store: StateStore
+    trust: TrustManager
     audit: AuditLog
 
 
@@ -59,9 +59,15 @@ def run_once(cfg: SentinelConfig) -> None:
         cfg.issue_tracker.sync_status(incident)
 
 
-def apply_status_change(state_store: "StateStore", audit: AuditLog,
-                        issue_tracker: "IssueTracker", incident_id: str,
-                        status: IncidentStatus, reason: str, actor: str) -> None:
+def apply_status_change(
+    state_store: StateStore,
+    audit: AuditLog,
+    issue_tracker: IssueTracker,
+    incident_id: str,
+    status: IncidentStatus,
+    reason: str,
+    actor: str,
+) -> None:
     """The single write path for any engine-visible status change."""
     incident = state_store.get(incident_id)
     if incident is None:

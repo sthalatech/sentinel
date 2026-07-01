@@ -39,7 +39,7 @@ class Result:
 class EscalationEvent:
     """Payload passed to a Notifier when an incident escalates."""
 
-    incident: "Incident"
+    incident: Incident
     reason: str
 
 
@@ -55,5 +55,5 @@ class Incident:
     attempts: int
     detected_at: datetime
     resolved_at: datetime | None
-    context: dict
+    context: dict[str, object]
     external_refs: dict[str, str] = field(default_factory=dict)

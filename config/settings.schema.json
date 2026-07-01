@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sentinel-loop/sentinel-loop/settings.schema.json",
+  "title": "SentinelLoopSettings",
+  "description": "Configuration file shape for sentinel-loop.",
+  "type": "object",
+  "properties": {
+    "detector": { "$ref": "#/$defs/plugin" },
+    "remediator": { "$ref": "#/$defs/plugin" },
+    "verifier": { "$ref": "#/$defs/plugin" },
+    "enforcer": { "$ref": "#/$defs/plugin" },
+    "notifier": { "$ref": "#/$defs/plugin" },
+    "issue_tracker": { "$ref": "#/$defs/plugin" },
+    "state_store": { "$ref": "#/$defs/plugin" },
+    "trust": {
+      "type": "object",
+      "description": "Global trust manager options.",
+      "properties": {
+        "level": {
+          "type": "string",
+          "description": "Initial global trust level, e.g. A4.",
+          "default": "A4"
+        }
+      },
+      "additionalProperties": false
+    },
+    "audit": { "$ref": "#/$defs/plugin" },
+    "orchestrator": {
+      "type": "object",
+      "description": "Timer loop options.",
+      "properties": {
+        "interval": {
+          "type": "number",
+          "description": "Seconds between scheduled runs.",
+          "default": 60,
+          "minimum": 0.1
+        },
+        "initial_backoff": {
+          "type": "number",
+          "description": "Seconds to wait before the first retry.",
+          "default": 1,
+          "minimum": 0
+        },
+        "max_backoff": {
+          "type": "number",
+          "description": "Maximum retry delay in seconds.",
+          "default": 300,
+          "minimum": 0
+        },
+        "backoff_factor": {
+          "type": "number",
+          "description": "Multiplier applied to retry delay.",
+          "default": 2,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "secrets": {
+      "type": "object",
+      "description": "Mapping of config key names to environment variable names.",
+      "additionalProperties": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "plugin": {
+      "type": "object",
+      "description": "Plugin specification by dotted import path and kwargs.",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Dotted import path to the plugin class."
+        },
+        "kwargs": {
+          "type": "object",
+          "description": "Constructor keyword arguments. Secrets use {\"from_env\": \"VAR\"}.",
+          "additionalProperties": true
+        }
+      },
+      "required": ["path"],
+      "additionalProperties": false
+    },
+    "secretRef": {
+      "type": "object",
+      "description": "Reference to an environment variable secret.",
+      "properties": {
+        "from_env": { "type": "string" }
+      },
+      "required": ["from_env"],
+      "additionalProperties": false
+    }
+  }
+}

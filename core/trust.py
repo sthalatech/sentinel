@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Protocol
+
 from .audit import AuditLog
 
 MIN_LEVEL = 1
@@ -11,8 +13,9 @@ DEFAULT_LEVEL = "A4"
 class TrustManager:
     """Holds one global trust level; demotes it on critical failures."""
 
-    def __init__(self, state_store: "TrustStore", audit: AuditLog,
-                 level: str = DEFAULT_LEVEL) -> None:
+    def __init__(
+        self, state_store: TrustStore, audit: AuditLog, level: str = DEFAULT_LEVEL
+    ) -> None:
         self._store = state_store
         self._audit = audit
         self._level = level
@@ -36,8 +39,14 @@ class TrustManager:
         self._audit.record_demotion(self._level, reason)
 
 
-class TrustStore:
+class TrustStore(Protocol):
     """Protocol for persisting the global trust level."""
 
-    def set_trust(self, level: str) -> None: ...
-    def get_trust(self) -> str: ...
+    def set_trust(self, level: str) -> None:
+        """Persist the global trust level."""
+        ...
+
+    def get_trust(self) -> str:
+        """Return the stored global trust level."""
+        ...
+
