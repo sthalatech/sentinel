@@ -18,6 +18,10 @@ if TYPE_CHECKING:
     from sentinel.interfaces.state_store import StateStore
     from sentinel.interfaces.verifier import Verifier
 
+MAX_ATTEMPTS_DEFAULT = 3
+
+_TERMINAL_STATUSES = (IncidentStatus.PAUSED, IncidentStatus.HUMAN_OWNED, IncidentStatus.ESCALATED)
+
 
 @dataclass
 class SentinelConfig:
@@ -32,6 +36,7 @@ class SentinelConfig:
     state_store: StateStore
     trust: TrustManager
     audit: AuditLog
+    max_attempts: int = MAX_ATTEMPTS_DEFAULT
 
 
 def run_once(cfg: SentinelConfig) -> None:
@@ -39,12 +44,13 @@ def run_once(cfg: SentinelConfig) -> None:
     for incident in cfg.detector.detect():
         cfg.state_store.put(incident)
         cfg.issue_tracker.sync_status(incident)
-        if incident.status in (IncidentStatus.PAUSED, IncidentStatus.HUMAN_OWNED):
+        if incident.status in _TERMINAL_STATUSES:
             continue
         if cfg.trust.is_locked_down():
             cfg.notifier.notify(EscalationEvent(incident, reason="trust-locked"))
             continue
         incident.status = IncidentStatus.REMEDIATING
+        incident.attempts += 1
         cfg.state_store.put(incident)
         cfg.issue_tracker.sync_status(incident)
         result = cfg.remediator.remediate(incident, cfg.enforcer)
@@ -52,6 +58,9 @@ def run_once(cfg: SentinelConfig) -> None:
         cfg.issue_tracker.comment(incident, f"Attempt {incident.attempts}: {result.summary}")
         if cfg.verifier.verify(incident):
             incident.status = IncidentStatus.RESOLVED
+        elif incident.attempts >= cfg.max_attempts:
+            incident.status = IncidentStatus.ESCALATED
+            cfg.notifier.notify(EscalationEvent(incident, reason="max-attempts-exceeded"))
         else:
             cfg.trust.demote(reason=incident.id)
             cfg.notifier.notify(EscalationEvent(incident, reason="unresolved"))
