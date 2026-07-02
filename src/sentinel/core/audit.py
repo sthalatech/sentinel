@@ -119,6 +119,28 @@ class AuditLog:
         self._sink.append(entry)
         return entry
 
+    def record_breach(
+        self,
+        incident_id: str,
+        summary: str,
+        actor: str = "hermes-remediator",
+    ) -> AuditEntry:
+        """Record a policy-enforcement breach into the hash chain.
+
+        A breach is a denied governance action's tool being invoked despite the
+        per-run allowlist (Hermes's pre-call gate failed open). This is recorded
+        under a dedicated ``breach`` kind so it is distinguishable in the audit
+        log from an ordinary failed remediation.
+        """
+        entry = self._next(
+            incident_id,
+            "breach",
+            actor,
+            {"summary": summary},
+        )
+        self._sink.append(entry)
+        return entry
+
     def record_enforcement(
         self,
         incident_id: str,

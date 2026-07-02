@@ -29,10 +29,19 @@ class Decision(Enum):
 
 @dataclass
 class Result:
-    """Outcome of a single remediation attempt."""
+    """Outcome of a single remediation attempt.
+
+    ``breach=True`` marks a policy-enforcement breach — a denied governance
+    action's tool was invoked despite the per-run allowlist (i.e. Hermes's
+    pre-call gate failed open). This is categorically distinct from an ordinary
+    failed fix: the engine must treat it with enforcement severity (lockdown /
+    escalate) rather than as a routine retry, and the audit log must record it
+    as a breach, not a normal remediation outcome.
+    """
 
     success: bool
     summary: str
+    breach: bool = False
 
 
 @dataclass

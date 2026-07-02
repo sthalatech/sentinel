@@ -433,6 +433,129 @@ def test_lockdown_passes_none_allowlist() -> None:
     assert client.calls[0]["tool_allowlist"] is None
 
 
+def test_post_run_audit_catches_pre_call_gate_fail_open() -> None:
+    """Adversarial: simulate Hermes's pre-call gate failing OPEN and confirm
+    the post-run message-history audit catches a denied tool invocation.
+
+    Verified in the real hermes-agent v0.18.0 package: both model_tools.py
+    (~line 1059) and agent/tool_executor.py (~line 418) wrap
+    get_pre_tool_call_block_message in `try/except Exception` that sets
+    block_message=None on any error, so the tool executes. To simulate that
+    fail-open we inject a message history in which the model invoked
+    roll_back_deployment (denied) and terminal (a shell primitive) despite the
+    allowlist being {'restart_workflow'}. The post-run scan must flag both as a
+    policy-enforcement breach (Result.breach=True), distinguishable from an
+    ordinary failed fix.
+    """
+    _reg, client = _fresh_registry()
+    # Simulate a fail-open: the gate let through a denied action's tool call
+    # AND a shell primitive. This is the OpenAI tool_call shape Hermes writes
+    # (verified in hermes-agent/message_sanitization.py).
+    client.run_result = HermesRunResult(
+        final_response="attempted rollback",
+        messages=[
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "roll_back_deployment",
+                            "arguments": '{"deployment":"api"}',
+                        },
+                    },
+                    {
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {
+                            "name": "terminal",
+                            "arguments": '{"command":"kubectl rollout undo deployment/api"}',
+                        },
+                    },
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "rolled back"},
+            {"role": "tool", "tool_call_id": "call_2", "content": "undone"},
+        ],
+    )
+    rem = HermesRemediator(
+        _make_factory(client),
+        _FixedEnforcer(["restart_workflow"]),  # NOT roll_back_deployment
+        _FixedTrust("A4"),
+        docker_check=_docker_ok,
+        config_loader=_config_docker,
+    )
+    result = rem.remediate(_make_incident(), rem._enforcer)  # noqa: SLF001
+    assert result.breach is True
+    assert result.success is False
+    assert "roll_back_deployment" in result.summary
+    assert "terminal" in result.summary
+    assert "breach" in result.summary
+
+
+def test_post_run_audit_clean_when_only_allowed_tools_invoked() -> None:
+    """No breach when the history contains only allowlisted tool calls."""
+    _reg, client = _fresh_registry()
+    client.run_result = HermesRunResult(
+        final_response="restarted",
+        messages=[
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "restart_workflow",
+                            "arguments": '{"workflow_id":"w-1"}',
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "restarted"},
+        ],
+    )
+    rem = HermesRemediator(
+        _make_factory(client),
+        _FixedEnforcer(["restart_workflow"]),
+        _FixedTrust("A4"),
+        docker_check=_docker_ok,
+        config_loader=_config_docker,
+    )
+    result = rem.remediate(_make_incident(), rem._enforcer)  # noqa: SLF001
+    assert result.breach is False
+    assert result.success is True
+
+
+def test_post_run_audit_fail_closed_on_unparseable_tool_call() -> None:
+    """A tool_call with no parseable name is treated as a breach (fail-closed)."""
+    _reg, client = _fresh_registry()
+    client.run_result = HermesRunResult(
+        final_response="hmm",
+        messages=[
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": "call_1", "type": "function", "function": {}},
+                ],
+            }
+        ],
+    )
+    rem = HermesRemediator(
+        _make_factory(client),
+        _FixedEnforcer(["restart_workflow"]),
+        _FixedTrust("A4"),
+        docker_check=_docker_ok,
+        config_loader=_config_docker,
+    )
+    result = rem.remediate(_make_incident(), rem._enforcer)  # noqa: SLF001
+    assert result.breach is True
+    assert result.success is False
+
+
 def test_per_action_toolset_names_are_unique() -> None:
     """No two actions share a toolset — the core guarantee of the redesign."""
     toolsets = [toolset_for(a) for a in DEFAULT_ACTIONS]

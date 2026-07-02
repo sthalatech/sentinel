@@ -175,6 +175,18 @@ class HermesRemediator(Remediator):
             conversation_history=history or None,
         )
         incident.external_refs["conversation"] = _serialize_history(run_result.messages)
+        allowlist = set(allowed) if allowed else set()
+        violations = _tool_call_violations(run_result.messages, allowlist)
+        if violations:
+            names = ", ".join(sorted(violations))
+            return Result(
+                success=False,
+                summary=(
+                    f"policy-enforcement breach: denied tool(s) invoked despite "
+                    f"allowlist: {names}"
+                ),
+                breach=True,
+            )
         return Result(success=True, summary=run_result.final_response[:200] or "hermes ran")
 
     def _resolve_toolsets(self, allowed: list[str]) -> list[str]:
@@ -245,6 +257,42 @@ class HermesRemediator(Remediator):
 def _serialize_history(messages: list[dict[str, Any]]) -> str:
     """Serialize the message history for storage in external_refs."""
     return json.dumps(messages, default=str)
+
+
+def _tool_call_violations(messages: list[dict[str, Any]], allowlist: set[str]) -> set[str]:
+    """Return tool names invoked in ``messages`` that are not in ``allowlist``.
+
+    Scans OpenAI-style assistant messages for ``tool_calls`` (each
+    ``{"function": {"name": ...}}``) — the exact shape Hermes writes into its
+    conversation history (verified in hermes-agent's ``message_sanitization.py``).
+    This is the post-run audit check: Hermes's pre-call gate
+    (``get_pre_tool_call_block_message``) is wrapped in ``try/except Exception``
+    that defaults to allowing the call through in both ``model_tools.py`` and
+    ``agent/tool_executor.py`` of the real installed package — so a denied tool
+    can execute if the gate throws. Catching it in the message history turns a
+    silent fail-open into a recorded breach.
+
+    Fail-closed: a tool_call whose function name is missing/unparseable is
+    treated as a violation (we cannot prove it was allowed).
+    """
+    violations: set[str] = set()
+    for msg in messages or []:
+        if not isinstance(msg, dict):
+            continue
+        tool_calls = msg.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+        for tc in tool_calls:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function")
+            name = fn.get("name") if isinstance(fn, dict) else None
+            if not isinstance(name, str) or not name:
+                violations.add("<unknown-tool>")
+                continue
+            if name not in allowlist:
+                violations.add(name)
+    return violations
 
 
 def _default_config_loader() -> dict[str, Any]:

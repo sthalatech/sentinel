@@ -56,7 +56,16 @@ def run_once(cfg: SentinelConfig) -> None:
         result = cfg.remediator.remediate(incident, cfg.enforcer)
         cfg.audit.record(incident, result)
         cfg.issue_tracker.comment(incident, f"Attempt {incident.attempts}: {result.summary}")
-        if cfg.verifier.verify(incident):
+        if getattr(result, "breach", False):
+            # Policy-enforcement breach: a denied action's tool was invoked
+            # despite the allowlist (Hermes's pre-call gate failed open). This
+            # is not a routine remediation failure — record it as a breach,
+            # demote trust hard, and escalate immediately rather than retrying.
+            cfg.audit.record_breach(incident.id, result.summary)
+            cfg.trust.demote(reason=f"breach:{incident.id}")
+            incident.status = IncidentStatus.ESCALATED
+            cfg.notifier.notify(EscalationEvent(incident, reason="policy-enforcement-breach"))
+        elif cfg.verifier.verify(incident):
             incident.status = IncidentStatus.RESOLVED
         elif incident.attempts >= cfg.max_attempts:
             incident.status = IncidentStatus.ESCALATED
