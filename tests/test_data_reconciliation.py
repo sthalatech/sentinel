@@ -10,9 +10,11 @@ and refuses anything malformed, and an end-to-end test proving the loop closes.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -320,10 +322,35 @@ def test_verifier_fail_closed_for_unknown_target() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _enforcer_allowing(actions: list[str]) -> Any:
+    """Build a fixed Enforcer stub allowing exactly ``actions`` for any trust."""
+    from tests.test_hermes_remediator import (  # noqa: PLC0415
+        _config_docker,
+        _docker_ok,
+        _FixedEnforcer,
+        _FixedTrust,
+    )
+
+    return _FixedEnforcer(actions), _FixedTrust("A4"), _docker_ok, _config_docker
+
+
 def test_end_to_end_detect_remediate_verify_closes_the_loop(tmp_path) -> None:
-    """Seed a mismatch -> detect() -> incident -> reconcile_table_write for each
-    embedded mismatch -> verify() returns True. This is the test that proves the
-    loop closes, not just that each piece works in isolation."""
+    """End-to-end through HermesRemediator.remediate(), NOT the backend directly.
+
+    Seed a mismatch -> detect() -> incident -> HermesRemediator.remediate() with
+    a fake Hermes client whose run() DISPATCHES to the registered handler (the
+    way a real Hermes tool call would) -> verify() returns True -> fresh detect()
+    empty. This is the test that proves the loop closes through the real wiring
+    path (build_spec_set -> wire_backend -> register_action_tools -> dispatch),
+    not just that each component works in isolation.
+    """
+    from sentinel.plugins.remediators.hermes import HermesRemediator
+    from sentinel.plugins.remediators.hermes_mcp_tools import build_spec_set
+    from tests.test_hermes_remediator import (  # noqa: PLC0415
+        FakeClient,
+        _RecordingRegistrar,
+    )
+
     src_path = str(tmp_path / "source.db")
     tgt_path = str(tmp_path / "target.db")
     src_conn = _make_table(src_path, "orders", {"o1": "shipped", "o2": "pending", "o3": "closed"})
@@ -332,7 +359,6 @@ def test_end_to_end_detect_remediate_verify_closes_the_loop(tmp_path) -> None:
     target = _target(src_conn, tgt_conn)
     detector = DataReconciliationDetector([target])
     verifier = DataReconciliationVerifier([target])
-    write = reconcile_table_write_backend({"orders": target.target})
 
     # 1. Detect: a mismatch exists.
     incidents = detector.detect()
@@ -343,15 +369,92 @@ def test_end_to_end_detect_remediate_verify_closes_the_loop(tmp_path) -> None:
     # 2. Verify before remediation: still mismatched.
     assert verifier.verify(inc) is False
 
-    # 3. Remediate: apply reconcile_table_write for each embedded mismatch.
-    for m in inc.context["mismatches"]:
-        out = write(table=m["table"], row_id=m["row_id"], expected=m["expected"])
-        assert "reconciled" in out, out
+    # 3. Remediate THROUGH THE REMEDIATOR (not the backend directly): build the
+    #    real wired spec set (build_spec_set -> wire_backend), register it with
+    #    the remediator, and have the fake client dispatch one reconcile_table_write
+    #    tool call per embedded mismatch to the registered handler.
+    reg = _RecordingRegistrar()
+    client = FakeClient(registrar=reg)
+    enforcer, trust, docker_ok, config_docker = _enforcer_allowing(["reconcile_table_write"])
+    client.tool_calls_to_simulate = [
+        {"name": "reconcile_table_write", "arguments": m} for m in inc.context["mismatches"]
+    ]
+    remediator = HermesRemediator(
+        lambda: client,
+        enforcer,
+        trust,
+        docker_check=docker_ok,
+        config_loader=config_docker,
+        spec_set=build_spec_set({"orders": target.target}),
+        registrar=reg,
+    )
+    result = remediator.remediate(inc, enforcer)
+    assert result.success is True, result.summary
+    assert result.breach is False
 
-    # 4. Verify after remediation: the loop closes.
+    # 4. The dispatching fake actually invoked the wired handler for each
+    #    mismatch (proving wire_backend was called on the real path): the rows
+    #    in the target DB now match the source.
     assert verifier.verify(inc) is True
 
     # 5. And a fresh detect() now finds nothing.
     assert detector.detect() == []
+    src_conn.close()
+    tgt_conn.close()
+
+
+def test_end_to_end_without_wiring_the_loop_does_not_close(tmp_path) -> None:
+    """Regression for the gap this work closes: if wire_backend() is NEVER called
+    (the spec set is default_specs with the _refuse placeholder), the loop must
+    NOT close. The dispatching fake runs the placeholder handler, the row stays
+    un-fixed, and verify() returns False. A fake that returned a canned success
+    regardless of the handler could not catch this — which is how the missing
+    wire_backend call got past the last report."""
+    from sentinel.plugins.remediators.hermes import HermesRemediator
+    from sentinel.plugins.remediators.hermes_mcp_tools import default_specs
+    from tests.test_hermes_remediator import (  # noqa: PLC0415
+        FakeClient,
+        _RecordingRegistrar,
+    )
+
+    src_path = str(tmp_path / "source.db")
+    tgt_path = str(tmp_path / "target.db")
+    src_conn = _make_table(src_path, "orders", {"o1": "shipped", "o2": "pending"})
+    tgt_conn = _make_table(tgt_path, "orders", {"o1": "shipped", "o2": "paid"})
+
+    target = _target(src_conn, tgt_conn)
+    detector = DataReconciliationDetector([target])
+    verifier = DataReconciliationVerifier([target])
+    inc = detector.detect()[0]
+    assert verifier.verify(inc) is False
+
+    reg = _RecordingRegistrar()
+    client = FakeClient(registrar=reg)
+    enforcer, trust, docker_ok, config_docker = _enforcer_allowing(["reconcile_table_write"])
+    client.tool_calls_to_simulate = [
+        {"name": "reconcile_table_write", "arguments": m} for m in inc.context["mismatches"]
+    ]
+    # default_specs (NOT build_spec_set): the reconcile handler is the _refuse
+    # placeholder, exactly the pre-fix wiring state.
+    remediator = HermesRemediator(
+        lambda: client,
+        enforcer,
+        trust,
+        docker_check=docker_ok,
+        config_loader=config_docker,
+        spec_set=default_specs,
+        registrar=reg,
+    )
+    result = remediator.remediate(inc, enforcer)
+    # The run itself succeeds (the placeholder returned a string, not a breach),
+    # but the row was NOT reconciled, so verification must still fail.
+    assert result.success is True
+    assert verifier.verify(inc) is False  # loop did NOT close — gap is visible
+    # And the placeholder handler's refusal shows up in the recorded tool result,
+    # proving the dispatching fake actually called the (un-wired) handler rather
+    # than pretending success.
+    convo = json.loads(inc.external_refs["conversation"])
+    tool_contents = [m["content"] for m in convo if m.get("role") == "tool"]
+    assert any("refused" in c for c in tool_contents), tool_contents
     src_conn.close()
     tgt_conn.close()

@@ -11,6 +11,7 @@ absent from a hand-picked list.
 from __future__ import annotations
 
 import json
+import sqlite3
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -35,14 +36,17 @@ class _RecordingRegistrar:
     """Minimal ToolRegistrar recording registrations in an in-memory registry.
 
     Mirrors the shape of Hermes's ``tools.registry.registry.register``: a tool
-    name is registered under a toolset with a schema + handler. ``list_tools``
-    then returns the registered tool names for the enabled toolsets only —
-    exactly what ``model_tools.get_tool_definitions(enabled_toolsets=[...])``
-    does on real Hermes.
+    name is registered under a toolset with a schema + handler. Crucially it
+    KEEPS the handler (Hermes's real registry does too — it dispatches to it on
+    tool calls), so a fake client can simulate real tool dispatch: the model
+    calls a tool, the registry routes the call to the registered handler. A fake
+    that throws the handler away cannot catch a "handler never wired" gap, which
+    is exactly how the missing ``wire_backend`` call got past the last report.
     """
 
     def __init__(self) -> None:
         self._by_toolset: dict[str, list[str]] = {}
+        self._handlers: dict[str, Any] = {}
 
     def register(
         self,
@@ -53,11 +57,12 @@ class _RecordingRegistrar:
         description: str = "",
         **_kwargs: Any,
     ) -> None:
-        """Record one tool under a toolset (Hermes registry.register shape)."""
-        del schema, handler, description
+        """Record one tool under a toolset and KEEP its handler (dispatch shape)."""
+        del schema, description
         self._by_toolset.setdefault(toolset, [])
         if name not in self._by_toolset[toolset]:
             self._by_toolset[toolset].append(name)
+        self._handlers[name] = handler
 
     def tools_for(self, enabled_toolsets: list[str]) -> list[str]:
         """Return tool names for the enabled toolsets (registry-level filter)."""
@@ -66,16 +71,47 @@ class _RecordingRegistrar:
             out.extend(self._by_toolset.get(ts, []))
         return out
 
+    def handler_for(self, name: str) -> Any:
+        """Return the registered handler for a tool name (None if unregistered)."""
+        return self._handlers.get(name)
+
+    def invoke(self, name: str, arguments: dict[str, Any]) -> str:
+        """Dispatch a tool call to its registered handler the way Hermes does.
+
+        If no handler is registered (or a placeholder ``_refuse`` handler is),
+        the call returns the handler's refusal string rather than executing —
+        so a handler-wiring gap shows up as an un-fixed row, not a silent pass.
+        """
+        handler = self._handlers.get(name)
+        if handler is None:
+            return f"{name}: no handler registered"
+        return str(handler(**arguments))
+
 
 @dataclass
 class FakeClient:
-    """Records calls; ``list_tools`` reflects the real per-action registry."""
+    """Records calls; ``list_tools`` reflects the real per-action registry.
+
+    Optionally simulates REAL tool dispatch: if ``tool_calls_to_simulate`` is
+    set, ``run`` dispatches each ``{name, arguments}`` to the registrar's
+    registered handler (gated by ``tool_allowlist``) and appends the OpenAI-shaped
+    assistant/tool messages the real Hermes run would produce — so the post-run
+    audit AND any verifier observe the actual handler outcome, not a canned
+    string. This is what lets a test catch a "handler never wired" gap: if
+    ``wire_backend`` was never called, the registered handler is the fail-closed
+    ``_refuse`` placeholder, the row stays un-fixed, and the verifier returns
+    False. A fake that returns a canned ``run_result`` regardless of the handler
+    cannot catch that class of gap.
+    """
 
     registrar: _RecordingRegistrar
     run_result: HermesRunResult = field(
         default_factory=lambda: HermesRunResult(final_response="fixed", messages=[])
     )
     calls: list[dict[str, Any]] = field(default_factory=list)
+    #: Optional tool calls the simulated "model" makes during run(); each entry
+    #: is {"name": str, "arguments": dict}. Dispatched to the real handler.
+    tool_calls_to_simulate: list[dict[str, Any]] = field(default_factory=list)
 
     def list_tools(self, enabled_toolsets: list[str]) -> list[str]:
         """Return the real tool names registered for the given toolsets."""
@@ -90,7 +126,7 @@ class FakeClient:
         skip_memory: bool,
         conversation_history: list[dict[str, Any]] | None,
     ) -> HermesRunResult:
-        """Record the call (incl. the per-tool-name allowlist) and return canned."""
+        """Record the call and, if simulating dispatch, run the real handlers."""
         self.calls.append(
             {
                 "message": message,
@@ -100,7 +136,38 @@ class FakeClient:
                 "conversation_history": conversation_history,
             }
         )
-        return self.run_result
+        if not self.tool_calls_to_simulate:
+            return self.run_result
+        return self._run_with_dispatch(tool_allowlist)
+
+    def _run_with_dispatch(self, tool_allowlist: set[str] | None) -> HermesRunResult:
+        """Simulate a real Hermes turn that invokes tools through the registry.
+
+        Builds the OpenAI-shaped assistant message with ``tool_calls`` and a
+        ``tool`` role message per call holding the handler's real result string —
+        the exact shape Hermes writes (verified in
+        hermes-agent/message_sanitization.py) and that the post-run audit scans.
+        A call to a tool not in ``tool_allowlist`` is recorded anyway (the audit
+        flags it as a breach), matching the fail-open scenario it must catch.
+        """
+        allow = tool_allowlist if tool_allowlist is not None else set()
+        tool_calls: list[dict[str, Any]] = []
+        tool_results: list[dict[str, Any]] = []
+        for i, call in enumerate(self.tool_calls_to_simulate):
+            name = call["name"]
+            args = call.get("arguments", {})
+            tool_calls.append(
+                {
+                    "id": f"call_{i}",
+                    "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(args)},
+                }
+            )
+            result = self.registrar.invoke(name, args) if name in allow else "blocked"
+            tool_results.append({"role": "tool", "tool_call_id": f"call_{i}", "content": result})
+        assistant = {"role": "assistant", "content": None, "tool_calls": tool_calls}
+        messages = [assistant, *tool_results]
+        return HermesRunResult(final_response="remediated", messages=messages)
 
 
 class _FixedEnforcer(Enforcer):
@@ -560,3 +627,67 @@ def test_per_action_toolset_names_are_unique() -> None:
     """No two actions share a toolset — the core guarantee of the redesign."""
     toolsets = [toolset_for(a) for a in DEFAULT_ACTIONS]
     assert len(toolsets) == len(set(toolsets))
+
+
+# ---------------------------------------------------------------------------
+# Real backend wiring: wire_backend()/build_spec_set() must actually be called
+# by the construction path, and a dispatching fake must land in the wired op.
+# ---------------------------------------------------------------------------
+
+
+def test_construction_registers_real_reconcile_handler_not_placeholder() -> None:
+    """The wiring gap this closes: build_spec_set() (which calls wire_backend)
+    replaces the fail-closed _refuse placeholder for reconcile_table_write with
+    the real backend, and HermesRemediator.__init__ registers THAT set against
+    the tool registry. Before this fix __init__ never called wire_backend at all,
+    so the registry held the placeholder and every reconcile call refused."""
+    from sentinel.plugins.datasource import SqliteTableSource
+    from sentinel.plugins.remediators.hermes_mcp_tools import build_spec_set
+
+    # default_specs['reconcile_table_write'].handler IS the _refuse placeholder:
+    # it refuses when called (the fail-closed default before any backend wired).
+    default_handler = default_specs["reconcile_table_write"].handler
+    assert "refused" in default_handler(table="t", row_id="r", expected="x")
+
+    # build_spec_set with a targets map wires the REAL backend instead.
+    conn = sqlite3.connect(":memory:")
+    with conn:
+        conn.execute("CREATE TABLE orders (id TEXT PRIMARY KEY, status TEXT)")
+        conn.execute("INSERT INTO orders VALUES ('o1','paid')")
+    targets = {"orders": SqliteTableSource(conn, "orders", "id")}
+    wired = build_spec_set(targets)
+    assert wired["reconcile_table_write"].handler is not default_handler
+
+    # Construct the remediator against a recording registrar and confirm the
+    # REAL handler (not the placeholder) is what the registry dispatches to.
+    reg = _RecordingRegistrar()
+    client = FakeClient(registrar=reg)
+    rem = HermesRemediator(
+        _make_factory(client),
+        _FixedEnforcer(["reconcile_table_write"]),
+        _FixedTrust("A4"),
+        docker_check=_docker_ok,
+        config_loader=_config_docker,
+        spec_set=wired,
+        registrar=reg,
+    )
+    out = reg.invoke(
+        "reconcile_table_write", {"table": "orders", "row_id": "o1", "expected": "shipped"}
+    )
+    assert "reconciled" in out, out  # real backend ran, not the refusal
+    assert conn.execute("SELECT status FROM orders WHERE id='o1'").fetchone()[0] == "shipped"
+    conn.close()
+    # The remediator stored exactly that wired spec set.
+    assert (
+        rem._spec_set["reconcile_table_write"].handler is wired["reconcile_table_write"].handler
+    )  # noqa: SLF001
+
+
+def test_construction_without_targets_leaves_refuse_placeholder_fail_closed() -> None:
+    """Forgetting to supply reconcile targets fails closed (placeholder stays),
+    never a silent no-op that pretends to succeed."""
+    from sentinel.plugins.remediators.hermes_mcp_tools import build_spec_set
+
+    spec_set = build_spec_set()  # no targets -> placeholder stays
+    out = spec_set["reconcile_table_write"].handler(table="orders", row_id="o1", expected="x")
+    assert "refused" in out

@@ -50,7 +50,11 @@ from sentinel.core.incident import Incident, Result
 from sentinel.core.trust import TrustStore
 from sentinel.interfaces.enforcer import Enforcer
 from sentinel.interfaces.remediator import Remediator
-from sentinel.plugins.remediators.hermes_mcp_tools import toolsets_for_actions
+from sentinel.plugins.remediators.hermes_mcp_tools import (
+    build_spec_set,
+    register_action_tools,
+    toolsets_for_actions,
+)
 
 #: Governance actions the remediator can expose as narrow per-action Hermes
 #: tools. Each action is registered (in ``hermes_mcp_tools``) under its own
@@ -137,6 +141,8 @@ class HermesRemediator(Remediator):
         actions: tuple[str, ...] | None = None,
         docker_check: Callable[[], bool] = _docker_daemon_running,
         config_loader: Callable[[], dict[str, Any]] | None = None,
+        spec_set: dict[str, Any] | None = None,
+        registrar: Any = None,
     ) -> None:
         self._client_factory = client_factory
         self._enforcer = enforcer
@@ -144,7 +150,9 @@ class HermesRemediator(Remediator):
         self._actions: tuple[str, ...] = actions if actions is not None else DEFAULT_ACTIONS
         self._docker_check = docker_check
         self._config_loader = config_loader or _default_config_loader
+        self._spec_set = spec_set if spec_set is not None else build_spec_set()
         self._verify_startup()
+        self._register_tools(registrar)
 
     def _verify_startup(self) -> None:
         """Refuse to construct if Docker is down or the backend is not docker."""
@@ -158,6 +166,27 @@ class HermesRemediator(Remediator):
                 "Hermes terminal.backend is not 'docker'; refusing to construct "
                 "HermesRemediator (local/unsandboxed execution is not permitted)"
             )
+
+    def _register_tools(self, registrar: Any) -> None:
+        """Register the wired spec_set's tools against Hermes's tool registry.
+
+        This is the call site that was missing: a real run must register the
+        per-action tools (with REAL handlers, not the fail-closed placeholders)
+        before any ``run_conversation`` so ``get_tool_definitions`` surfaces them
+        and dispatch lands in the wired operation. ``registrar`` defaults to
+        Hermes's global ``tools.registry.registry`` in production; tests inject a
+        recording registrar so handler-wiring gaps are observable. When no
+        registrar is supplied and Hermes is not installed (CI), there is no
+        global registry to register against and the remediator cannot run
+        anyway, so registration is silently skipped rather than crashing.
+        """
+        reg = registrar
+        if reg is None:
+            try:
+                reg = _default_registrar()
+            except ImportError:
+                return
+        register_action_tools(reg, self._spec_set)
 
     def remediate(self, incident: Incident, enforcer: Enforcer) -> Result:
         """Resolve the trust surface, verify it, then run one Hermes turn."""
@@ -300,3 +329,16 @@ def _default_config_loader() -> dict[str, Any]:
     from hermes_cli.config import load_config  # type: ignore[import-not-found]
 
     return dict(load_config())
+
+
+def _default_registrar() -> Any:
+    """Resolve Hermes's global tool registry (lazy import; production only).
+
+    Hermes's ``model_tools.get_tool_definitions`` reads from the global
+    ``tools.registry.registry`` singleton, so production registration targets
+    that object. Imported lazily so the module (and its tests) load without the
+    ``hermes-agent`` package installed.
+    """
+    from tools.registry import registry  # type: ignore[import-not-found]
+
+    return registry

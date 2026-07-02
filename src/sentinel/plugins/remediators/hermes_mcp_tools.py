@@ -26,6 +26,12 @@ Hermes toolset filtering is toolset-level only (``get_tool_definitions`` has no
 per-tool-name include), so one-toolset-per-action is the granularity primitive.
 Handlers dispatch to injectable operation callables and fail closed (refuse) if
 no backend is wired, so the module imports cleanly without real Temporal/k8s.
+
+Scope boundary — ``reconcile_table_write`` only supports tables with a single
+non-key column today: the ``expected`` value it writes is the comparable value
+produced by ``SqliteTableSource.snapshot()``, which is verbatim only for a
+single non-key column (a hash for multiple). Multi-column reconciliation is out
+of scope until an explicit value mapping is added; the backend refuses it.
 """
 
 from __future__ import annotations
@@ -242,6 +248,34 @@ def wire_backend(action: str, operation: Operation) -> ActionToolSpec:
     return ActionToolSpec(
         action=base.action, description=base.description, schema=base.schema, handler=operation
     )
+
+
+def build_spec_set(
+    reconcile_targets_by_table: dict[str, Any] | None = None,
+) -> dict[str, ActionToolSpec]:
+    """Return the full action spec set with real backends wired where supplied.
+
+    This is the wiring point a real run uses (instead of ``default_specs``
+    unmodified): it starts from the narrow per-action ``default_specs`` and, for
+    ``reconcile_table_write``, replaces the fail-closed ``_refuse`` placeholder
+    with ``reconcile_table_write_backend(targets_by_table)`` so the tool actually
+    writes to the target DB via the SQLite abstraction. Other actions keep their
+    ``_refuse`` placeholder until their own backends are supplied; the set still
+    imports and registers cleanly.
+
+    ``reconcile_targets_by_table`` maps table name -> ``DataSource``-with-
+    ``write_row`` (e.g. ``SqliteTableSource``) for the live DB being reconciled.
+    ``None`` (default) leaves the placeholder in place — fail closed, never a
+    silent no-op — so a caller that forgets to supply targets gets the same
+    explicit refusal as before, not a handler that pretends to succeed.
+    """
+    spec_set = dict(default_specs)
+    if reconcile_targets_by_table is not None:
+        spec_set["reconcile_table_write"] = wire_backend(
+            "reconcile_table_write",
+            reconcile_table_write_backend(reconcile_targets_by_table),
+        )
+    return spec_set
 
 
 class HermesAIAgentClient:

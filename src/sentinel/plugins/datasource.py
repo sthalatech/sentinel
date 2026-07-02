@@ -9,6 +9,10 @@ detector, verifier, or tool handler. Today only one concrete implementation is
 needed: ``SqliteTableSource``, which reads a named table via a configurable key
 column and hashes the remaining columns into the comparable value. It works
 against a plain ``sqlite3`` connection (no new dependency).
+
+Scope: ``write_row`` only supports single-non-key-column tables — the
+``expected`` value it writes is verbatim only for one column (a hash otherwise),
+so multi-column reconciliation is refused until an explicit value mapping lands.
 """
 
 from __future__ import annotations

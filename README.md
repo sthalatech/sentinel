@@ -104,6 +104,14 @@ HUMAN_OWNED ← explicitly assigned to a human
 `PAUSED` and `HUMAN_OWNED` incidents are skipped by the engine until a human
 reopens them through the single write path.
 
+## Remediation actions
+
+The Hermes remediator exposes one narrow tool per governance action (see
+`docs/SECURITY.md`). `reconcile_table_write` reconciles one mismatched DB row
+to its canonical value — it only supports tables with a single non-key column
+today; multi-column reconciliation is refused until an explicit value mapping is
+added.
+
 ## CLI usage
 
 ```bash
