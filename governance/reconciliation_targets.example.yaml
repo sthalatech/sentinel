@@ -1,0 +1,24 @@
+# Sentinel Loop example data-reconciliation target list.
+#
+# This is an illustration; copy it, tune it to your environment, and pass its
+# path to DataReconciliationDetector via load_targets_from_config(...). The
+# detector compares each target's `source` (canonical/expected) against its
+# `target` (live) DataSource row-by-row and emits ONE incident per mismatched
+# target whose context carries a bounded list of per-row mismatches shaped like
+# reconcile_table_write's schema: {table, row_id, expected}.
+#
+# No secrets live in this repo: connection details reference ENV-VARIABLE NAMES
+# (resolved at runtime via the SecretProvider, e.g. EnvSecretProvider), never
+# raw credentials. Set the named env vars on the host running sentinel.
+#
+# Today the only concrete DataSource is SqliteTableSource (sqlite3 stdlib), so
+# each target names two sqlite database file paths by env var. Pointing the loop
+# at Postgres/an API later means supplying a different DataSource — the
+# detector, verifier, and reconcile_table_write handler stay unchanged.
+
+targets:
+  - name: orders_vs_warehouse
+    table: orders
+    key_column: order_id
+    source_db_path_env: SENTINEL_RECON_SOURCE_DB_PATH   # canonical/expected DB
+    target_db_path_env: SENTINEL_RECON_TARGET_DB_PATH   # live DB being reconciled

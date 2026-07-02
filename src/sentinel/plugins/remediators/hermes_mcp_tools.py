@@ -78,6 +78,41 @@ def _refuse(action: str, reason: str) -> Callable[..., str]:
     return _h
 
 
+def reconcile_table_write_backend(
+    targets_by_table: dict[str, Any],
+) -> Operation:
+    """Return a narrow handler that reconciles one row of a known target table.
+
+    Backs the ``reconcile_table_write`` tool with the same SQLite abstraction
+    the detector/verifier use (``SqliteTableSource.write_row``). The handler
+    accepts EXACTLY ``{table, row_id, expected}`` and performs that one write;
+    it refuses any table not registered in ``targets_by_table`` (fail closed —
+    the model cannot write to an arbitrary table), and never accepts or executes
+    a shell command or arbitrary SQL. ``targets_by_table`` maps table name to a
+    ``DataSource``-with-``write_row`` (e.g. ``SqliteTableSource``) for the live
+    DB being reconciled.
+    """
+
+    def _h(**kwargs: Any) -> str:
+        # Validate the exact narrow contract at the handler boundary too, so a
+        # malformed call is refused even if it bypassed the tool schema.
+        table = kwargs.get("table")
+        row_id = kwargs.get("row_id")
+        expected = kwargs.get("expected")
+        if not (isinstance(table, str) and isinstance(row_id, str) and isinstance(expected, str)):
+            return "reconcile_table_write: refused; expected {table,row_id,expected} as strings"
+        source = targets_by_table.get(table)
+        if source is None:
+            return f"reconcile_table_write: refused; table {table!r} not registered"
+        try:
+            source.write_row(row_id, expected)
+        except Exception as exc:  # noqa: BLE001 - surface the failure, never raise
+            return f"reconcile_table_write: failed for {table}:{row_id}: {exc}"
+        return f"reconcile_table_write: reconciled {table}:{row_id}"
+
+    return _h
+
+
 #: Default narrow specs for every governance remediation action. Each tool's
 #: schema admits ONLY its action's parameters — no free-form command surface.
 default_specs: dict[str, ActionToolSpec] = {

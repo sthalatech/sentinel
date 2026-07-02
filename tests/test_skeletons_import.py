@@ -17,13 +17,14 @@ from sentinel.plugins.state_stores.postgres_store import PostgresStateStore
 
 
 def test_detector_protocol_methods() -> None:
-    """Detectors expose the detect method."""
+    """Detectors expose the detect method; skeletons raise NotImplementedError."""
     assert hasattr(TemporalWorkflowDetector, "detect")
     assert hasattr(DataReconciliationDetector, "detect")
     with pytest.raises(NotImplementedError):
         TemporalWorkflowDetector(address="temporal:7233").detect()
-    with pytest.raises(NotImplementedError):
-        DataReconciliationDetector(left_dsn="left", right_dsn="right", query="SELECT 1").detect()
+    # DataReconciliationDetector is now a real implementation (targets list);
+    # with no targets it returns an empty list rather than raising.
+    assert DataReconciliationDetector(targets=[]).detect() == []
 
 
 def test_orchestrator_protocol_methods() -> None:
