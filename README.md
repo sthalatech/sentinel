@@ -41,8 +41,10 @@ sentinel/
 │   │   └── orchestrator.py
 │   ├── plugins/          # Plugin implementations (one file per plugin)
 │   │   ├── detectors/        # mock, temporal, data_reconciliation
-│   │   ├── remediators/      # mock, shelley, claude_agent_sdk, human_manual
-│   │   ├── enforcers/        # noop, agt
+│   │   ├── remediators/      # hermes (primary — see docs/SECURITY.md), mock,
+│   │   │                     # shelley, claude_agent_sdk, human_manual
+│   │   ├── enforcers/        # noop, agt (policy.yaml + trust
+│   │   │                     # ladder — see docs/SECURITY.md)
 │   │   ├── notifiers/        # stdout, webhook, slack
 │   │   ├── issue_trackers/   # github_issues, linear, jira
 │   │   ├── state_stores/     # sqlite_store, postgres_store
@@ -79,9 +81,9 @@ sentinel incidents list
 | Interface | File | One-line job |
 |-----------|------|--------------|
 | Detector | `src/sentinel/interfaces/detector.py` | Find problems. |
-| Remediator | `src/sentinel/interfaces/remediator.py` | Fix one incident. |
+| Remediator | `src/sentinel/interfaces/remediator.py` | Fix one incident. Hermes plugs in here. |
 | Verifier | `src/sentinel/interfaces/verifier.py` | Confirm the fix. |
-| Enforcer | `src/sentinel/interfaces/enforcer.py` | Authorize tool actions. |
+| Enforcer | `src/sentinel/interfaces/enforcer.py` | Restrict tool surface pre-run. See `docs/SECURITY.md`. |
 | Notifier | `src/sentinel/interfaces/notifier.py` | Escalate to humans. |
 | IssueTracker | `src/sentinel/interfaces/issue_tracker.py` | Mirror lifecycle externally. |
 | StateStore | `src/sentinel/interfaces/state_store.py` | Persist incidents. |
