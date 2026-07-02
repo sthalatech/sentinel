@@ -50,6 +50,24 @@ DEFAULT_ACTION_TOOLSETS: dict[str, str] = {
     "roll_back_deployment": "terminal",
 }
 
+#: Real Hermes tool names each toolset registers, probed against Hermes v0.18.0
+#: via ``model_tools.get_tool_definitions(enabled_toolsets=[...])``. ``list_tools``
+#: returns these tool names (e.g. ``process``, ``patch``), which are a *different
+#: vocabulary* from governance action names (e.g. ``restart_workflow``) — so the
+#: surface check must translate tool names back into the action space via this
+#: map before computing leaks. Browser/computer_use toolsets are intentionally
+#: absent: they are never in the remediation allow-list.
+TOOLSET_TOOLS: dict[str, tuple[str, ...]] = {
+    "terminal": ("process", "terminal"),
+    "file": ("patch", "read_file", "search_files", "write_file"),
+    "web": (),
+}
+
+#: Inverse of ``TOOLSET_TOOLS`` — real Hermes tool name -> its toolset.
+TOOL_TO_TOOLSET: dict[str, str] = {
+    tool: toolset for toolset, tools in TOOLSET_TOOLS.items() for tool in tools
+}
+
 
 class HermesClient(Protocol):
     """Abstracted Hermes AIAgent surface so tests can inject a fake."""
@@ -111,6 +129,7 @@ class HermesRemediator(Remediator):
         trust_store: TrustStore,
         *,
         action_toolsets: dict[str, str] | None = None,
+        toolset_tools: dict[str, tuple[str, ...]] | None = None,
         docker_check: Callable[[], bool] = _docker_daemon_running,
         config_loader: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
@@ -118,6 +137,7 @@ class HermesRemediator(Remediator):
         self._enforcer = enforcer
         self._trust_store = trust_store
         self._action_toolsets = dict(action_toolsets or DEFAULT_ACTION_TOOLSETS)
+        self._toolset_tools = dict(toolset_tools or TOOLSET_TOOLS)
         self._docker_check = docker_check
         self._config_loader = config_loader or _default_config_loader
         self._verify_startup()
@@ -140,7 +160,7 @@ class HermesRemediator(Remediator):
         allowed = enforcer.allowed_actions(self._trust_store.get_trust())
         toolsets = self._resolve_toolsets(allowed)
         client = self._client_factory()
-        self._verify_tool_surface(client, toolsets, allowed, incident.id)
+        self._verify_tool_surface(client, toolsets, incident.id)
         history = self._load_history(incident)
         message = self._build_message(incident, allowed)
         run_result = client.run(
@@ -165,21 +185,46 @@ class HermesRemediator(Remediator):
         self,
         client: HermesClient,
         toolsets: list[str],
-        allowed: list[str],
         incident_id: str,
     ) -> None:
-        """Verify the listed action-tools exactly match the allowed surface.
+        """Verify the tool listing exposes no governance action outside the intent.
 
-        Registry-level check: an action not in ``allowed`` must not appear in
-        Hermes's tool listing for the configured toolsets. If a denied action
-        leaks through, refuse rather than run.
+        Hermes ``list_tools`` returns *real tool names* (e.g. ``process``,
+        ``patch``), a different vocabulary from governance *action names* (e.g.
+        ``restart_workflow``). Comparing them directly would always report every
+        tool as a leak. Instead we translate the listing into the action space:
+        each listed tool maps to a toolset, each toolset unlocks a set of
+        actions, and we refuse if any unlocked action is not among the actions
+        the enabled toolsets were *intended* to provide. Unknown tool names (no
+        known toolset) fail closed — they indicate an unexpected surface.
         """
         listed = set(client.list_tools(toolsets))
-        leaked = listed - set(allowed)
+        tool_to_toolset = {
+            tool: toolset for toolset, tools in self._toolset_tools.items() for tool in tools
+        }
+        unknown = {tool for tool in listed if tool not in tool_to_toolset}
+        if unknown:
+            raise HermesRefusedError(
+                f"tool-surface restriction failed for incident {incident_id}: "
+                f"unrecognized Hermes tools present: {sorted(unknown)}"
+            )
+        listed_toolsets = {tool_to_toolset[tool] for tool in listed}
+        intended_toolsets = set(toolsets)
+        intended_actions = {
+            action
+            for action, toolset in self._action_toolsets.items()
+            if toolset in intended_toolsets
+        }
+        listed_actions = {
+            action
+            for action, toolset in self._action_toolsets.items()
+            if toolset in listed_toolsets
+        }
+        leaked = listed_actions - intended_actions
         if leaked:
             raise HermesRefusedError(
                 f"tool-surface restriction failed for incident {incident_id}: "
-                f"denied actions present in Hermes listing: {sorted(leaked)}"
+                f"denied actions reachable via Hermes listing: {sorted(leaked)}"
             )
 
     def _load_history(self, incident: Incident) -> list[dict[str, Any]]:
