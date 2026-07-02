@@ -86,14 +86,16 @@ class FakeClient:
         message: str,
         *,
         enabled_toolsets: list[str],
+        tool_allowlist: set[str] | None,
         skip_memory: bool,
         conversation_history: list[dict[str, Any]] | None,
     ) -> HermesRunResult:
-        """Record the call and return the canned run result."""
+        """Record the call (incl. the per-tool-name allowlist) and return canned."""
         self.calls.append(
             {
                 "message": message,
                 "enabled_toolsets": list(enabled_toolsets),
+                "tool_allowlist": set(tool_allowlist) if tool_allowlist else None,
                 "skip_memory": skip_memory,
                 "conversation_history": conversation_history,
             }
@@ -392,6 +394,43 @@ def test_default_actions_shape() -> None:
     assert "roll_back_deployment" in DEFAULT_ACTIONS
     # Every action maps to its own per-action toolset (1:1, no sharing).
     assert toolsets_for_actions(list(DEFAULT_ACTIONS)) == [toolset_for(a) for a in DEFAULT_ACTIONS]
+
+
+def test_invoke_time_whitelist_blocks_denied_action_tool() -> None:
+    """Defense in depth: even if a denied action's tool leaked into the listing,
+    the per-run tool-name allowlist passed to client.run blocks it at invoke
+    time. This mirrors Hermes's real ``set_thread_tool_whitelist`` gate checked
+    in ``agent_runtime_helpers`` before every tool execution.
+    """
+    _reg, client = _fresh_registry()
+    rem = HermesRemediator(
+        _make_factory(client),
+        _FixedEnforcer(["restart_workflow"]),  # NOT roll_back_deployment
+        _FixedTrust("A4"),
+        docker_check=_docker_ok,
+        config_loader=_config_docker,
+    )
+    rem.remediate(_make_incident(), rem._enforcer)  # noqa: SLF001
+    allowlist = client.calls[0]["tool_allowlist"]
+    assert allowlist == {"restart_workflow"}
+    # The denied action's tool name is not in the allowlist a real client would
+    # hand to set_thread_tool_whitelist -> its invocation would be blocked.
+    assert "roll_back_deployment" not in allowlist
+    assert "terminal" not in allowlist
+
+
+def test_lockdown_passes_none_allowlist() -> None:
+    """A1 lockdown (no allowed actions) passes tool_allowlist=None (no gate)."""
+    _reg, client = _fresh_registry()
+    rem = HermesRemediator(
+        _make_factory(client),
+        _FixedEnforcer([]),
+        _FixedTrust("A1"),
+        docker_check=_docker_ok,
+        config_loader=_config_docker,
+    )
+    rem.remediate(_make_incident(), rem._enforcer)  # noqa: SLF001
+    assert client.calls[0]["tool_allowlist"] is None
 
 
 def test_per_action_toolset_names_are_unique() -> None:

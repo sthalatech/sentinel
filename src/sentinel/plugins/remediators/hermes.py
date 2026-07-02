@@ -26,7 +26,11 @@ Enforcement is per-action, not toolset-routed (contrast with shell toolsets):
   actions — so denying ``roll_back_deployment`` means its toolset is never
   registered and the model has no surface that can perform a rollback. The tool
   listing is then verified (see ``_verify_tool_surface``) to be exactly the
-  allowed action tool names, not merely registry-shaped.
+  allowed action tool names, not merely registry-shaped. As defense in depth,
+  the run is also executed under Hermes's per-thread tool-name whitelist
+  (``set_thread_tool_whitelist``), which blocks any tool not in the allowed set
+  at invoke time — independent of the registry — so a denied action's operation
+  is unreachable even if a tool leaked into the listing.
 
 Sandbox hard requirement:
   Construction refuses if the Docker daemon is down or Hermes config
@@ -75,10 +79,18 @@ class HermesClient(Protocol):
         message: str,
         *,
         enabled_toolsets: list[str],
+        tool_allowlist: set[str] | None,
         skip_memory: bool,
         conversation_history: list[dict[str, Any]] | None,
     ) -> HermesRunResult:
-        """Run one headless turn; return the final response + message history."""
+        """Run one headless turn under a per-tool-name invoke-time allowlist.
+
+        ``tool_allowlist`` is the set of governance action tool names the model
+        may invoke this run; a real client applies it via Hermes's
+        ``set_thread_tool_whitelist`` so a denied action's tool is blocked at
+        invoke time even if it somehow surfaced in the registry. ``None`` means
+        no invoke-time gate (lockdown runs with an empty toolset need no gate).
+        """
         ...
 
 
@@ -158,6 +170,7 @@ class HermesRemediator(Remediator):
         run_result = client.run(
             message,
             enabled_toolsets=toolsets,
+            tool_allowlist=set(allowed) if allowed else None,
             skip_memory=True,
             conversation_history=history or None,
         )

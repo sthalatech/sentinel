@@ -207,3 +207,58 @@ def wire_backend(action: str, operation: Operation) -> ActionToolSpec:
     return ActionToolSpec(
         action=base.action, description=base.description, schema=base.schema, handler=operation
     )
+
+
+class HermesAIAgentClient:
+    """Real Hermes client wrapping ``AIAgent`` with a per-run tool-name allowlist.
+
+    Applies Hermes's ``set_thread_tool_whitelist`` around each run so a denied
+    action's tool is blocked at invoke time (``agent_runtime_helpers`` checks
+    ``get_pre_tool_call_block_message`` before every tool execution), in addition
+    to the registry-level isolation from per-action toolsets. The whitelist is
+    cleared in ``finally`` so it can never leak across runs/threads.
+    """
+
+    def __init__(self, agent_factory: Callable[[], Any]) -> None:
+        self._agent_factory = agent_factory
+        self._agent: Any | None = None
+
+    def list_tools(self, enabled_toolsets: list[str]) -> list[str]:
+        """Return the real tool names Hermes registers for these toolsets."""
+        from model_tools import get_tool_definitions  # type: ignore[import-not-found]
+
+        defs = get_tool_definitions(enabled_toolsets=enabled_toolsets, quiet_mode=True)
+        return [d["function"]["name"] for d in defs]
+
+    def run(
+        self,
+        message: str,
+        *,
+        enabled_toolsets: list[str],
+        tool_allowlist: set[str] | None,
+        skip_memory: bool,
+        conversation_history: list[dict[str, Any]] | None,
+    ) -> Any:
+        """Run one headless turn under a per-tool-name invoke-time allowlist."""
+        from hermes_cli.plugins import (  # type: ignore[import-not-found]
+            clear_thread_tool_whitelist,
+            set_thread_tool_whitelist,
+        )
+
+        if self._agent is None:
+            self._agent = self._agent_factory()
+        if tool_allowlist is not None:
+            set_thread_tool_whitelist(tool_allowlist)
+        try:
+            result = self._agent.run_conversation(
+                user_message=message,
+                conversation_history=conversation_history,
+            )
+        finally:
+            if tool_allowlist is not None:
+                clear_thread_tool_whitelist()
+        final = str(result.get("response") or result.get("final_response") or "")
+        messages = list(result.get("messages") or [])
+        from sentinel.plugins.remediators.hermes import HermesRunResult
+
+        return HermesRunResult(final_response=final, messages=messages)
