@@ -53,11 +53,13 @@ class AGTEnforcer(Enforcer):
         self,
         policy_path: str = "",
         trust_store: TrustStore | None = None,
+        audit: Any = None,
     ) -> None:
         self._policy_path = Path(
             policy_path or os.environ.get("AGT_POLICY_PATH", "governance/policy.example.yaml")
         )
         self._trust_store = trust_store
+        self._audit = audit
         policy = _load_yaml(self._policy_path)
         top = policy.get("policy")
         if not isinstance(top, dict):
@@ -109,14 +111,37 @@ class AGTEnforcer(Enforcer):
 
     def authorize(self, action: str) -> Decision:
         """Return ALLOW, DENY, or REQUIRE_APPROVAL for a named action."""
+        decision, matched = self._evaluate(action)
+        self._emit(action, decision, matched)
+        return decision
+
+    def _evaluate(self, action: str) -> tuple[Decision, str]:
+        """Compute the (decision, matched_rule) pair for an action."""
         if action in self._require_approval:
-            return Decision.REQUIRE_APPROVAL
+            return Decision.REQUIRE_APPROVAL, "policy.require_approval"
         if self._trust_store is None:
             raise RuntimeError("AGTEnforcer has no trust store; cannot read level")
         level = self._trust_store.get_trust()
         entry = self._level_entry(level)
         if action in entry.get("require_approval_for", []):
-            return Decision.REQUIRE_APPROVAL
+            return Decision.REQUIRE_APPROVAL, f"{level}.require_approval_for"
         if action in entry.get("allowed_actions", []):
-            return Decision.ALLOW
-        return Decision.DENY
+            return Decision.ALLOW, f"{level}.allowed_actions"
+        return Decision.DENY, "default_deny"
+
+    def _emit(self, action: str, decision: Decision, matched_rule: str) -> None:
+        """Mirror the decision into the audit chain when an audit log is wired."""
+        if self._audit is None:
+            return
+        self._audit.record_enforcement(
+            incident_id="enforcer",
+            action=action,
+            decision=decision.value,
+            matched_rule=matched_rule,
+        )
+
+    def allowed_actions(self, trust_level: str) -> list[str]:
+        """Return the actions permitted without approval at a trust level."""
+        entry = self._level_entry(trust_level)
+        actions = entry.get("allowed_actions", [])
+        return [str(a) for a in actions]

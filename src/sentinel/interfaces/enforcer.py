@@ -13,3 +13,11 @@ class Enforcer(Protocol):
     def authorize(self, action: str) -> Decision:
         """Return ALLOW, DENY, or REQUIRE_APPROVAL for a named action."""
         ...
+
+    def allowed_actions(self, trust_level: str) -> list[str]:
+        """Return the actions permitted without approval at a trust level.
+
+        Remediators that restrict the tool surface *before* a run (rather than
+        gating each call mid-run) use this to render their toolset allowlist.
+        """
+        ...

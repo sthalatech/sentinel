@@ -118,3 +118,25 @@ class AuditLog:
         entry = self._next("trust", "reset", actor, {"new_level": new_level, "reason": reason})
         self._sink.append(entry)
         return entry
+
+    def record_enforcement(
+        self,
+        incident_id: str,
+        action: str,
+        decision: str,
+        matched_rule: str,
+        actor: str = "enforcer",
+    ) -> AuditEntry:
+        """Record an enforcer authorization decision into the hash chain."""
+        entry = self._next(
+            incident_id,
+            "enforcement",
+            actor,
+            {
+                "action": action,
+                "decision": decision,
+                "matched_rule": matched_rule,
+            },
+        )
+        self._sink.append(entry)
+        return entry

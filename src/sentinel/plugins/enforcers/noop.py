@@ -18,3 +18,7 @@ class NoopEnforcer:
     def authorize(self, action: str) -> Decision:
         """Authorize any action."""
         return Decision.ALLOW
+
+    def allowed_actions(self, trust_level: str) -> list[str]:
+        """NoopEnforcer claims every action is allowed (it does not gate)."""
+        return []
