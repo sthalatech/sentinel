@@ -68,6 +68,9 @@ def run_once(cfg: SentinelConfig) -> None:
         elif cfg.verifier.verify(incident):
             incident.status = IncidentStatus.RESOLVED
         elif incident.attempts >= cfg.max_attempts:
+            # Escalate only — do not also demote trust: escalation already halts
+            # automated retries for this incident, so a cap hit is a ceiling, not
+            # a repeated failure to penalize.
             incident.status = IncidentStatus.ESCALATED
             cfg.notifier.notify(EscalationEvent(incident, reason="max-attempts-exceeded"))
         else:

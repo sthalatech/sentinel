@@ -30,8 +30,8 @@ Example: a custom detector in `my_project/detectors/stale_workflow.py`:
 ```python
 from __future__ import annotations
 from datetime import datetime, timezone
-from core.incident import Incident, IncidentStatus
-from interfaces.detector import Detector
+from sentinel.core.incident import Incident, IncidentStatus
+from sentinel.interfaces.detector import Detector
 
 class StaleWorkflowDetector(Detector):
     def detect(self) -> list[Incident]:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 import os
 import pathlib
 from dataclasses import dataclass, field
@@ -18,6 +19,8 @@ from sentinel.plugins.enforcers.noop import NoopEnforcer
 from sentinel.plugins.notifiers.stdout import StdoutNotifier
 from sentinel.plugins.remediators.mock import MockRemediator
 from sentinel.plugins.state_stores.sqlite_store import SqliteAuditSink, SqliteStateStore
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -84,6 +87,14 @@ def _build_config(store: SqliteStateStore, interval: float) -> SentinelConfig:
     """Wire all defaults around a given sqlite store."""
     audit = AuditLog(SqliteAuditSink(store))
     trust = TrustManager(store, audit)
+    # Loud warning, matching NoopEnforcer: the zero-setup default notifier prints
+    # escalations to stdout only, so in a real deployment escalations go nowhere
+    # anyone is watching. Stays a warning (not a hard fail) to keep the
+    # zero-required-infra default working.
+    logger.warning(
+        "StdoutNotifier active: escalations only appear in process logs, not "
+        "proactively delivered"
+    )
     return SentinelConfig(
         detector=MockDetector(count=1, factory=default_mock_incident),
         remediator=MockRemediator(),
