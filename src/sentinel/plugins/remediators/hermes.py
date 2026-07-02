@@ -10,15 +10,23 @@ Why Hermes's AIAgent library (not the -z CLI):
   — two rounds of validation found real gaps between Hermes's docs and its
   behaviour there, so we depend only on the stable ``conversation_history`` arg.
 
-Enforcement is pre-run, not prompt-bound (contrast with ShelleyRemediator):
-  Hermes exposes ``enabled_toolsets``, which performs **registry-level** tool
-  removal: ``model_tools.get_tool_definitions(enabled_toolsets=[...])`` omits
-  every tool whose toolset is not enabled. So before each run we resolve the
-  current trust level's ``allowed_actions`` from the enforcer, map each action
-  to a Hermes toolset, and set ``enabled_toolsets`` to that union. An action
-  not on the allowed list is never registered as a tool the model can see —
-  verified via the tool listing after configuring it (see
-  ``_verify_tool_surface``), not by trusting the config alone.
+Enforcement is per-action, not toolset-routed (contrast with shell toolsets):
+  Hermes's built-in ``terminal``/``file``/``web`` toolsets are generic execution
+  primitives — ``terminal`` takes an arbitrary ``command`` shell string. Mapping
+  governance actions onto them cannot enforce an action-level distinction: a
+  trust level allowing ``restart_workflow`` but denying ``roll_back_deployment``
+  (both mapped to ``terminal``) still hands the model a shell, so it can run
+  ``kubectl rollout undo`` regardless of the allow-list. Confirmed against Hermes
+  v0.18.0: ``model_tools.get_tool_definitions(enabled_toolsets=["terminal"])``
+  registers ``terminal`` with a free-form ``command`` parameter.
+  Instead we register one narrow tool per governance action, each in its OWN
+  toolset ``sentinel_<action>`` (see ``hermes_mcp_tools``), exposing only that
+  action's specific parameters with no shell surface. Before each run we resolve
+  ``allowed_actions`` and enable exactly the per-action toolsets for those
+  actions — so denying ``roll_back_deployment`` means its toolset is never
+  registered and the model has no surface that can perform a rollback. The tool
+  listing is then verified (see ``_verify_tool_surface``) to be exactly the
+  allowed action tool names, not merely registry-shaped.
 
 Sandbox hard requirement:
   Construction refuses if the Docker daemon is down or Hermes config
@@ -38,35 +46,21 @@ from sentinel.core.incident import Incident, Result
 from sentinel.core.trust import TrustStore
 from sentinel.interfaces.enforcer import Enforcer
 from sentinel.interfaces.remediator import Remediator
+from sentinel.plugins.remediators.hermes_mcp_tools import toolsets_for_actions
 
-#: Default mapping of governance actions to Hermes toolsets. A remediation
-#: action is only reachable if its toolset is in the run's enabled_toolsets.
-DEFAULT_ACTION_TOOLSETS: dict[str, str] = {
-    "restart_workflow": "terminal",
-    "reconcile_table_write": "file",
-    "clear_cache": "terminal",
-    "retry_webhook": "web",
-    "scale_resource": "terminal",
-    "roll_back_deployment": "terminal",
-}
-
-#: Real Hermes tool names each toolset registers, probed against Hermes v0.18.0
-#: via ``model_tools.get_tool_definitions(enabled_toolsets=[...])``. ``list_tools``
-#: returns these tool names (e.g. ``process``, ``patch``), which are a *different
-#: vocabulary* from governance action names (e.g. ``restart_workflow``) — so the
-#: surface check must translate tool names back into the action space via this
-#: map before computing leaks. Browser/computer_use toolsets are intentionally
-#: absent: they are never in the remediation allow-list.
-TOOLSET_TOOLS: dict[str, tuple[str, ...]] = {
-    "terminal": ("process", "terminal"),
-    "file": ("patch", "read_file", "search_files", "write_file"),
-    "web": (),
-}
-
-#: Inverse of ``TOOLSET_TOOLS`` — real Hermes tool name -> its toolset.
-TOOL_TO_TOOLSET: dict[str, str] = {
-    tool: toolset for toolset, tools in TOOLSET_TOOLS.items() for tool in tools
-}
+#: Governance actions the remediator can expose as narrow per-action Hermes
+#: tools. Each action is registered (in ``hermes_mcp_tools``) under its own
+#: ``sentinel_<action>`` toolset with a schema admitting only that action's
+#: parameters — no shared shell/file toolset, so denying one action never
+#: exposes another's underlying operation.
+DEFAULT_ACTIONS: tuple[str, ...] = (
+    "restart_workflow",
+    "reconcile_table_write",
+    "clear_cache",
+    "retry_webhook",
+    "scale_resource",
+    "roll_back_deployment",
+)
 
 
 class HermesClient(Protocol):
@@ -128,16 +122,14 @@ class HermesRemediator(Remediator):
         enforcer: Enforcer,
         trust_store: TrustStore,
         *,
-        action_toolsets: dict[str, str] | None = None,
-        toolset_tools: dict[str, tuple[str, ...]] | None = None,
+        actions: tuple[str, ...] | None = None,
         docker_check: Callable[[], bool] = _docker_daemon_running,
         config_loader: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self._client_factory = client_factory
         self._enforcer = enforcer
         self._trust_store = trust_store
-        self._action_toolsets = dict(action_toolsets or DEFAULT_ACTION_TOOLSETS)
-        self._toolset_tools = dict(toolset_tools or TOOLSET_TOOLS)
+        self._actions: tuple[str, ...] = actions if actions is not None else DEFAULT_ACTIONS
         self._docker_check = docker_check
         self._config_loader = config_loader or _default_config_loader
         self._verify_startup()
@@ -160,7 +152,7 @@ class HermesRemediator(Remediator):
         allowed = enforcer.allowed_actions(self._trust_store.get_trust())
         toolsets = self._resolve_toolsets(allowed)
         client = self._client_factory()
-        self._verify_tool_surface(client, toolsets, incident.id)
+        self._verify_tool_surface(client, toolsets, allowed, incident.id)
         history = self._load_history(incident)
         message = self._build_message(incident, allowed)
         run_result = client.run(
@@ -173,58 +165,48 @@ class HermesRemediator(Remediator):
         return Result(success=True, summary=run_result.final_response[:200] or "hermes ran")
 
     def _resolve_toolsets(self, allowed: list[str]) -> list[str]:
-        """Map the allowed governance actions to the Hermes toolsets they need."""
-        toolsets: list[str] = []
-        for action in allowed:
-            ts = self._action_toolsets.get(action)
-            if ts is not None and ts not in toolsets:
-                toolsets.append(ts)
-        return toolsets
+        """Map allowed governance actions to their per-action Hermes toolsets.
+
+        Each action lives in its own ``sentinel_<action>`` toolset, so there is a
+        1:1 mapping — enabling a toolset surfaces exactly that action's narrow
+        tool and no other action's operation.
+        """
+        known = set(self._actions)
+        unknown = [a for a in allowed if a not in known]
+        if unknown:
+            raise HermesRefusedError(f"unknown remediation actions in allow-list: {unknown}")
+        return toolsets_for_actions(allowed)
 
     def _verify_tool_surface(
         self,
         client: HermesClient,
         toolsets: list[str],
+        allowed: list[str],
         incident_id: str,
     ) -> None:
-        """Verify the tool listing exposes no governance action outside the intent.
+        """Verify the tool listing is exactly the allowed action tool names.
 
-        Hermes ``list_tools`` returns *real tool names* (e.g. ``process``,
-        ``patch``), a different vocabulary from governance *action names* (e.g.
-        ``restart_workflow``). Comparing them directly would always report every
-        tool as a leak. Instead we translate the listing into the action space:
-        each listed tool maps to a toolset, each toolset unlocks a set of
-        actions, and we refuse if any unlocked action is not among the actions
-        the enabled toolsets were *intended* to provide. Unknown tool names (no
-        known toolset) fail closed — they indicate an unexpected surface.
+        With per-action toolsets, the listed tool names ARE governance action
+        names (each ``sentinel_<action>`` toolset registers one tool named
+        ``<action>``), so the vocabularies match and we can check the listing is
+        exactly ``set(allowed)``. Any extra tool (e.g. a leaked ``terminal``
+        shell primitive) or any missing allowed tool fails closed — the model
+        must neither gain a denied action's surface nor silently lose an allowed
+        one.
         """
         listed = set(client.list_tools(toolsets))
-        tool_to_toolset = {
-            tool: toolset for toolset, tools in self._toolset_tools.items() for tool in tools
-        }
-        unknown = {tool for tool in listed if tool not in tool_to_toolset}
-        if unknown:
-            raise HermesRefusedError(
-                f"tool-surface restriction failed for incident {incident_id}: "
-                f"unrecognized Hermes tools present: {sorted(unknown)}"
-            )
-        listed_toolsets = {tool_to_toolset[tool] for tool in listed}
-        intended_toolsets = set(toolsets)
-        intended_actions = {
-            action
-            for action, toolset in self._action_toolsets.items()
-            if toolset in intended_toolsets
-        }
-        listed_actions = {
-            action
-            for action, toolset in self._action_toolsets.items()
-            if toolset in listed_toolsets
-        }
-        leaked = listed_actions - intended_actions
+        intended = set(allowed)
+        leaked = listed - intended
+        missing = intended - listed
         if leaked:
             raise HermesRefusedError(
                 f"tool-surface restriction failed for incident {incident_id}: "
-                f"denied actions reachable via Hermes listing: {sorted(leaked)}"
+                f"tools present beyond the allow-list: {sorted(leaked)}"
+            )
+        if missing:
+            raise HermesRefusedError(
+                f"tool-surface restriction failed for incident {incident_id}: "
+                f"allowed actions missing from Hermes listing: {sorted(missing)}"
             )
 
     def _load_history(self, incident: Incident) -> list[dict[str, Any]]:

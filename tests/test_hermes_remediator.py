@@ -1,4 +1,12 @@
-"""Tests for HermesRemediator (fake/injected client; no live Hermes in CI)."""
+"""Tests for HermesRemediator (fake/injected client; no live Hermes in CI).
+
+The fakes here are deliberately NOT shaped to the implementation's assumptions.
+``FakeClient.list_tools`` returns whatever Hermes's real
+``model_tools.get_tool_definitions`` would register for the given toolsets
+against a real per-action tool registry built via ``hermes_mcp_tools`` — so a
+denied action's underlying operation is genuinely unreachable, not merely
+absent from a hand-picked list.
+"""
 
 from __future__ import annotations
 
@@ -11,34 +19,67 @@ from sentinel.core.incident import Incident, IncidentStatus
 from sentinel.core.trust import TrustStore
 from sentinel.interfaces.enforcer import Enforcer
 from sentinel.plugins.remediators.hermes import (
-    DEFAULT_ACTION_TOOLSETS,
+    DEFAULT_ACTIONS,
     HermesRemediator,
     HermesRunResult,
 )
+from sentinel.plugins.remediators.hermes_mcp_tools import (
+    default_specs,
+    register_action_tools,
+    toolset_for,
+    toolsets_for_actions,
+)
+
+
+class _RecordingRegistrar:
+    """Minimal ToolRegistrar recording registrations in an in-memory registry.
+
+    Mirrors the shape of Hermes's ``tools.registry.registry.register``: a tool
+    name is registered under a toolset with a schema + handler. ``list_tools``
+    then returns the registered tool names for the enabled toolsets only —
+    exactly what ``model_tools.get_tool_definitions(enabled_toolsets=[...])``
+    does on real Hermes.
+    """
+
+    def __init__(self) -> None:
+        self._by_toolset: dict[str, list[str]] = {}
+
+    def register(
+        self,
+        name: str,
+        toolset: str,
+        schema: dict[str, Any],
+        handler: Any,
+        description: str = "",
+        **_kwargs: Any,
+    ) -> None:
+        """Record one tool under a toolset (Hermes registry.register shape)."""
+        del schema, handler, description
+        self._by_toolset.setdefault(toolset, [])
+        if name not in self._by_toolset[toolset]:
+            self._by_toolset[toolset].append(name)
+
+    def tools_for(self, enabled_toolsets: list[str]) -> list[str]:
+        """Return tool names for the enabled toolsets (registry-level filter)."""
+        out: list[str] = []
+        for ts in enabled_toolsets:
+            out.extend(self._by_toolset.get(ts, []))
+        return out
 
 
 @dataclass
 class FakeClient:
-    """Records calls and returns canned tool listings / run results.
+    """Records calls; ``list_tools`` reflects the real per-action registry."""
 
-    ``toolset_to_tools`` maps a Hermes toolset to the *real tool names* Hermes
-    registers for it (e.g. ``terminal`` -\u003e ``["process", "terminal"]``), so
-    tests exercise the same tool-name-vs-action-name translation the production
-    ``_verify_tool_surface`` must perform against a live Hermes.
-    """
-
-    toolset_to_tools: dict[str, list[str]] = field(default_factory=dict)
+    registrar: _RecordingRegistrar
     run_result: HermesRunResult = field(
         default_factory=lambda: HermesRunResult(final_response="fixed", messages=[])
     )
     calls: list[dict[str, Any]] = field(default_factory=list)
 
     def list_tools(self, enabled_toolsets: list[str]) -> list[str]:
-        """Return the real tool names Hermes registers for the given toolsets."""
-        out: list[str] = []
-        for ts in enabled_toolsets:
-            out.extend(self.toolset_to_tools.get(ts, []))
-        return out
+        """Return the real tool names registered for the given toolsets."""
+        return self.registrar.tools_for(enabled_toolsets)
 
     def run(
         self,
@@ -124,11 +165,18 @@ def _config_docker() -> dict[str, Any]:
     return {"terminal": {"backend": "docker"}}
 
 
+def _fresh_registry() -> tuple[_RecordingRegistrar, FakeClient]:
+    """Build a fresh per-action registry + client (clean slate per test)."""
+    reg = _RecordingRegistrar()
+    register_action_tools(reg, default_specs)
+    return reg, FakeClient(registrar=reg)
+
+
 def test_construction_refuses_without_docker() -> None:
     """Constructing HermesRemediator without Docker raises HermesRefusedError."""
     from sentinel.plugins.remediators.hermes import HermesRefusedError
 
-    client = FakeClient()
+    _reg, client = _fresh_registry()
     try:
         HermesRemediator(
             _make_factory(client),
@@ -146,7 +194,7 @@ def test_construction_refuses_with_non_docker_backend() -> None:
     """A non-docker terminal backend is refused (no silent degrade to local)."""
     from sentinel.plugins.remediators.hermes import HermesRefusedError
 
-    client = FakeClient()
+    _reg, client = _fresh_registry()
     try:
         HermesRemediator(
             _make_factory(client),
@@ -160,59 +208,73 @@ def test_construction_refuses_with_non_docker_backend() -> None:
         assert "terminal.backend is not 'docker'" in str(exc)
 
 
-def test_allowed_actions_translate_from_real_tool_names() -> None:
-    """A legitimate A4 run passes: Hermes lists real tool names, not action names.
+def test_adversarial_restart_allowed_rollback_denied_no_shell() -> None:
+    """The user's adversarial scenario, against the per-action tool design.
 
-    Hermes's ``list_tools`` returns tool names (``process``, ``patch``, ...) which
-    ``_verify_tool_surface`` must translate back to governance actions. With only
-    the terminal+file toolsets enabled, the listing exposes no action outside the
-    intended surface, so remediation proceeds.
+    Trust level allows ``restart_workflow`` but NOT ``roll_back_deployment``.
+    Both were routed through the ``terminal`` toolset under the old design,
+    which handed the model a shell. Under per-action toolsets, the model's
+    tool listing is exactly ``['restart_workflow']`` — no ``terminal``, no
+    ``process``, no surface capable of ``kubectl rollout undo``. The denied
+    action's tool is not merely absent from a curated list; its toolset was
+    never enabled, so the registry cannot surface it.
     """
-    client = FakeClient(
-        toolset_to_tools={
-            "terminal": ["process", "terminal"],
-            "file": ["patch", "read_file", "search_files", "write_file"],
-        }
-    )
+    reg, client = _fresh_registry()
     rem = HermesRemediator(
         _make_factory(client),
-        _FixedEnforcer(["restart_workflow", "clear_cache", "reconcile_table_write"]),
+        _FixedEnforcer(["restart_workflow"]),  # NOT roll_back_deployment
         _FixedTrust("A4"),
         docker_check=_docker_ok,
         config_loader=_config_docker,
     )
-    rem.remediate(_make_incident(), rem._enforcer)  # noqa: SLF001 - test access
+    rem.remediate(_make_incident(), rem._enforcer)  # noqa: SLF001
+
     call = client.calls[0]
-    listed = client.list_tools(call["enabled_toolsets"])
-    # The listing is real tool names, not action names — the bug would have
-    # refused this run because {process, terminal, patch, ...} - allowed != empty.
-    assert set(listed) == {
-        "process",
-        "terminal",
-        "patch",
-        "read_file",
-        "search_files",
-        "write_file",
-    }
-    assert "roll_back_deployment" not in listed  # action name never appears
+    enabled = call["enabled_toolsets"]
+    listed = client.list_tools(enabled)
+    assert enabled == [toolset_for("restart_workflow")]
+    assert listed == ["restart_workflow"]
+    # The shell primitive that would have enabled roll_back_deployment's op:
+    assert "terminal" not in listed
+    assert "process" not in listed
+    assert "roll_back_deployment" not in listed
+    # And the rollback toolset was never enabled, so its tool is unreachable:
+    assert client.list_tools([toolset_for("roll_back_deployment")]) == ["roll_back_deployment"]
+    assert toolset_for("roll_back_deployment") not in enabled
+
+
+def test_a4_full_surface_lists_exactly_allowed_actions() -> None:
+    """A full A4 surface lists exactly the allowed action tool names."""
+    allowed = ["restart_workflow", "reconcile_table_write", "clear_cache", "retry_webhook"]
+    _reg, client = _fresh_registry()
+    rem = HermesRemediator(
+        _make_factory(client),
+        _FixedEnforcer(allowed),
+        _FixedTrust("A4"),
+        docker_check=_docker_ok,
+        config_loader=_config_docker,
+    )
+    rem.remediate(_make_incident(), rem._enforcer)  # noqa: SLF001
+    listed = client.list_tools(client.calls[0]["enabled_toolsets"])
+    assert set(listed) == set(allowed)
 
 
 def test_tool_surface_leak_is_refused() -> None:
-    """A leaked toolset is refused in action-space.
+    """If an extra tool surfaces beyond the allow-list, remediation is refused.
 
-    Only ``terminal`` is enabled, but Hermes also serves a ``file`` tool
-    (``patch``). Translating the listing into actions unlocks
-    ``reconcile_table_write``, which is not intended by the terminal-only
-    surface — so remediation is refused.
+    Models a real registry leak: a stray shell tool registered under the
+    restart_workflow toolset. The same-vocabulary surface check refuses because
+    the listing is not exactly the allowed set.
     """
     from sentinel.plugins.remediators.hermes import HermesRefusedError
 
-    client = FakeClient(
-        toolset_to_tools={
-            # Realistic registry leak: a file tool mis-registered under the
-            # terminal toolset, so it surfaces even when only terminal is enabled.
-            "terminal": ["process", "terminal", "patch"],
-        }
+    reg, client = _fresh_registry()
+    # Inject a leak: a shell tool mis-registered under the restart toolset.
+    reg.register(
+        name="terminal",
+        toolset=toolset_for("restart_workflow"),
+        schema={},
+        handler=lambda **_k: "shell",
     )
     rem = HermesRemediator(
         _make_factory(client),
@@ -225,18 +287,16 @@ def test_tool_surface_leak_is_refused() -> None:
         rem.remediate(_make_incident(), rem._enforcer)  # noqa: SLF001
         raise AssertionError("expected HermesRefusedError on tool-surface leak")
     except HermesRefusedError as exc:
-        assert "reconcile_table_write" in str(exc)
+        assert "terminal" in str(exc)
 
 
-def test_unknown_tool_name_fails_closed() -> None:
-    """An unrecognized Hermes tool name is refused (fail-closed surface check)."""
+def test_missing_allowed_tool_is_refused() -> None:
+    """An allowed action whose tool fails to register is refused (fail closed)."""
     from sentinel.plugins.remediators.hermes import HermesRefusedError
 
-    client = FakeClient(
-        toolset_to_tools={
-            "terminal": ["process", "terminal", "browser_navigate"],
-        }
-    )
+    reg, client = _fresh_registry()
+    # Sabotage: drop the restart_workflow registration so it won't surface.
+    reg._by_toolset.pop(toolset_for("restart_workflow"), None)  # noqa: SLF001
     rem = HermesRemediator(
         _make_factory(client),
         _FixedEnforcer(["restart_workflow"]),
@@ -246,20 +306,36 @@ def test_unknown_tool_name_fails_closed() -> None:
     )
     try:
         rem.remediate(_make_incident(), rem._enforcer)  # noqa: SLF001
-        raise AssertionError("expected HermesRefusedError for unknown tool")
+        raise AssertionError("expected HermesRefusedError for missing allowed tool")
     except HermesRefusedError as exc:
-        assert "unrecognized Hermes tools" in str(exc)
-        assert "browser_navigate" in str(exc)
+        assert "missing from Hermes listing" in str(exc)
+
+
+def test_unknown_allowed_action_refused() -> None:
+    """An action not in the known action set is refused before the run."""
+    from sentinel.plugins.remediators.hermes import HermesRefusedError
+
+    _reg, client = _fresh_registry()
+    rem = HermesRemediator(
+        _make_factory(client),
+        _FixedEnforcer(["restart_workflow", "delete_database"]),
+        _FixedTrust("A4"),
+        docker_check=_docker_ok,
+        config_loader=_config_docker,
+    )
+    try:
+        rem.remediate(_make_incident(), rem._enforcer)  # noqa: SLF001
+        raise AssertionError("expected HermesRefusedError for unknown action")
+    except HermesRefusedError as exc:
+        assert "delete_database" in str(exc)
 
 
 def test_resume_replays_conversation_history() -> None:
     """A second attempt on the same incident replays the stored history."""
-    client = FakeClient(
-        toolset_to_tools={"terminal": ["process", "terminal"]},
-        run_result=HermesRunResult(
-            final_response="done",
-            messages=[{"role": "assistant", "content": "done"}],
-        ),
+    _reg, client = _fresh_registry()
+    client.run_result = HermesRunResult(
+        final_response="done",
+        messages=[{"role": "assistant", "content": "done"}],
     )
     rem = HermesRemediator(
         _make_factory(client),
@@ -280,7 +356,7 @@ def test_resume_replays_conversation_history() -> None:
 
 def test_lockdown_runs_with_empty_toolset() -> None:
     """At A1 lockdown (no allowed actions) the run still happens with no tools."""
-    client = FakeClient(toolset_to_tools={})
+    _reg, client = _fresh_registry()
     rem = HermesRemediator(
         _make_factory(client),
         _FixedEnforcer([]),
@@ -291,11 +367,12 @@ def test_lockdown_runs_with_empty_toolset() -> None:
     result = rem.remediate(_make_incident(), rem._enforcer)  # noqa: SLF001
     assert result.success is True
     assert client.calls[0]["enabled_toolsets"] == []
+    assert client.list_tools([]) == []
 
 
 def test_stateless_flags_passed_to_run() -> None:
     """skip_memory=True is wired in (genuinely stateless per-incident runs)."""
-    client = FakeClient(toolset_to_tools={"terminal": ["process", "terminal"]})
+    _reg, client = _fresh_registry()
     rem = HermesRemediator(
         _make_factory(client),
         _FixedEnforcer(["restart_workflow"]),
@@ -305,10 +382,19 @@ def test_stateless_flags_passed_to_run() -> None:
     )
     rem.remediate(_make_incident(), rem._enforcer)  # noqa: SLF001
     assert client.calls[0]["skip_memory"] is True
-    assert "terminal" in client.calls[0]["enabled_toolsets"]
+    assert client.calls[0]["enabled_toolsets"] == [toolset_for("restart_workflow")]
 
 
-def test_default_action_toolsets_shape() -> None:
-    """The default action->toolset mapping covers the governance ladder's actions."""
-    assert DEFAULT_ACTION_TOOLSETS["restart_workflow"] == "terminal"
-    assert DEFAULT_ACTION_TOOLSETS["reconcile_table_write"] == "file"
+def test_default_actions_shape() -> None:
+    """The default action set covers the governance ladder's actions."""
+    assert "restart_workflow" in DEFAULT_ACTIONS
+    assert "reconcile_table_write" in DEFAULT_ACTIONS
+    assert "roll_back_deployment" in DEFAULT_ACTIONS
+    # Every action maps to its own per-action toolset (1:1, no sharing).
+    assert toolsets_for_actions(list(DEFAULT_ACTIONS)) == [toolset_for(a) for a in DEFAULT_ACTIONS]
+
+
+def test_per_action_toolset_names_are_unique() -> None:
+    """No two actions share a toolset — the core guarantee of the redesign."""
+    toolsets = [toolset_for(a) for a in DEFAULT_ACTIONS]
+    assert len(toolsets) == len(set(toolsets))
