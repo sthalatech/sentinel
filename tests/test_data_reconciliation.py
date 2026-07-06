@@ -458,3 +458,42 @@ def test_end_to_end_without_wiring_the_loop_does_not_close(tmp_path) -> None:
     assert any("refused" in c for c in tool_contents), tool_contents
     src_conn.close()
     tgt_conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Live-trial regression: a real model can hallucinate a row_id on its first
+# call. write_row must report that nothing changed (0 rows) so the handler tells
+# the model "no row matched" instead of falsely confirming a fix.
+# ---------------------------------------------------------------------------
+
+
+def test_reconcile_handler_reports_no_op_when_row_id_does_not_exist(tmp_path) -> None:
+    """A hallucinated row_id updates 0 rows; the handler must say so, not
+    'reconciled'. Otherwise the model believes the fix landed and stops."""
+    from sentinel.plugins.remediators.hermes_mcp_tools import build_spec_set
+
+    conn = sqlite3.connect(str(tmp_path / "t.db"))
+    conn.execute("CREATE TABLE orders (id TEXT PRIMARY KEY, status TEXT)")
+    conn.execute("INSERT INTO orders VALUES ('o1','paid')")
+    conn.commit()
+    spec = build_spec_set({"orders": SqliteTableSource(conn, "orders", "id")})
+    # Real dispatch shape: one positional dict.
+    out = spec["reconcile_table_write"].handler(
+        {"table": "orders", "row_id": "nope", "expected": "shipped"}
+    )
+    assert "no row matched" in out, out
+    # And the real row is untouched.
+    assert conn.execute("SELECT status FROM orders WHERE id='o1'").fetchone()[0] == "paid"
+    conn.close()
+
+
+def test_write_row_returns_rowcount_for_real_fix(tmp_path) -> None:
+    """write_row returns the number of rows actually updated (1 for a real fix)."""
+    conn = sqlite3.connect(str(tmp_path / "t.db"))
+    conn.execute("CREATE TABLE orders (id TEXT PRIMARY KEY, status TEXT)")
+    conn.execute("INSERT INTO orders VALUES ('o1','paid')")
+    conn.commit()
+    src = SqliteTableSource(conn, "orders", "id")
+    assert src.write_row("o1", "shipped") == 1
+    assert src.write_row("missing", "shipped") == 0
+    conn.close()

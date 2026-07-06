@@ -76,9 +76,15 @@ class ActionToolSpec:
 
 
 def _refuse(action: str, reason: str) -> Callable[..., str]:
-    """Return a handler that fails closed until a real backend is wired."""
+    """Return a handler that fails closed until a real backend is wired.
 
-    def _h(**_kwargs: Any) -> str:
+    Hermes's tool registry dispatches handlers as ``handler(args, **kwargs)``
+    where ``args`` is the parsed-arguments dict (see tools/registry.py
+    ``ToolRegistry.run`` and tools/mcp_tool.py's dispatch-interface docstring).
+    The handler therefore takes one positional dict, not bare keyword args.
+    """
+
+    def _h(_args: Any | None = None, **_kwargs: Any) -> str:
         return f"{action}: refused ({reason}); no backend wired"
 
     return _h
@@ -99,24 +105,40 @@ def reconcile_table_write_backend(
     DB being reconciled.
     """
 
-    def _h(**kwargs: Any) -> str:
-        # Validate the exact narrow contract at the handler boundary too, so a
-        # malformed call is refused even if it bypassed the tool schema.
-        table = kwargs.get("table")
-        row_id = kwargs.get("row_id")
-        expected = kwargs.get("expected")
-        if not (isinstance(table, str) and isinstance(row_id, str) and isinstance(expected, str)):
-            return "reconcile_table_write: refused; expected {table,row_id,expected} as strings"
-        source = targets_by_table.get(table)
-        if source is None:
-            return f"reconcile_table_write: refused; table {table!r} not registered"
-        try:
-            source.write_row(row_id, expected)
-        except Exception as exc:  # noqa: BLE001 - surface the failure, never raise
-            return f"reconcile_table_write: failed for {table}:{row_id}: {exc}"
-        return f"reconcile_table_write: reconciled {table}:{row_id}"
+    def _h(args: Any | None = None, **kwargs: Any) -> str:
+        # Hermes dispatches handler(args_dict, **kwargs): the parsed tool
+        # arguments arrive as the single positional ``args`` dict. Accept both
+        # that and bare kwargs (defensive) so the contract holds either way.
+        a: dict[str, Any] = {}
+        if isinstance(args, dict):
+            a.update(args)
+        a.update(kwargs)
+        return _reconcile_one(targets_by_table, a)
 
     return _h
+
+
+def _reconcile_one(targets_by_table: dict[str, Any], a: dict[str, Any]) -> str:
+    """Validate one reconcile call and apply it to the registered target."""
+    # Validate the exact narrow contract at the handler boundary too, so a
+    # malformed call is refused even if it bypassed the tool schema.
+    table = a.get("table")
+    row_id = a.get("row_id")
+    expected = a.get("expected")
+    if not (isinstance(table, str) and isinstance(row_id, str) and isinstance(expected, str)):
+        return "reconcile_table_write: refused; expected {table,row_id,expected} as strings"
+    source = targets_by_table.get(table)
+    if source is None:
+        return f"reconcile_table_write: refused; table {table!r} not registered"
+    try:
+        changed = source.write_row(row_id, expected)
+    except Exception as exc:  # noqa: BLE001 - surface the failure, never raise
+        return f"reconcile_table_write: failed for {table}:{row_id}: {exc}"
+    if changed <= 0:
+        # No row matched row_id (e.g. a hallucinated id). Tell the model so it
+        # retries with the right id rather than believing the fix landed.
+        return f"reconcile_table_write: no row matched {table}:{row_id}; nothing changed"
+    return f"reconcile_table_write: reconciled {table}:{row_id}"
 
 
 #: Default narrow specs for every governance remediation action. Each tool's

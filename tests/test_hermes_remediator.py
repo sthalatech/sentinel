@@ -78,14 +78,18 @@ class _RecordingRegistrar:
     def invoke(self, name: str, arguments: dict[str, Any]) -> str:
         """Dispatch a tool call to its registered handler the way Hermes does.
 
-        If no handler is registered (or a placeholder ``_refuse`` handler is),
-        the call returns the handler's refusal string rather than executing —
-        so a handler-wiring gap shows up as an un-fixed row, not a silent pass.
+        Hermes's ``ToolRegistry.run`` dispatches as ``handler(args_dict)`` — ONE
+        positional dict, not bare kwargs (verified in tools/registry.py and
+        tools/mcp_tool.py's dispatch-interface docstring). Dispatching the same
+        way here is what catches a handler-signature bug like ``def _h(**kwargs)``
+        that crashes on real dispatch but passes a kwargs-calling fake. A
+        handler-wiring gap (placeholder) shows up as a refusal string, not a
+        silent pass.
         """
         handler = self._handlers.get(name)
         if handler is None:
             return f"{name}: no handler registered"
-        return str(handler(**arguments))
+        return str(handler(arguments))
 
 
 @dataclass
@@ -691,3 +695,138 @@ def test_construction_without_targets_leaves_refuse_placeholder_fail_closed() ->
     spec_set = build_spec_set()  # no targets -> placeholder stays
     out = spec_set["reconcile_table_write"].handler(table="orders", row_id="o1", expected="x")
     assert "refused" in out
+
+
+# ---------------------------------------------------------------------------
+# Live-trial regressions: real Hermes dispatches handler(args_dict) (ONE
+# positional dict), and the post-run audit must distinguish a denied tool that
+# was BLOCKED at invoke time (defense-in-depth worked) from one that fail-opened
+# and actually ran. Both were found by the first live run against a real Hermes
+# instance (openai/gpt-oss-20b:free via OpenRouter) — impossible to catch with a
+# kwargs-calling fake or an audit that ignored tool results.
+# ---------------------------------------------------------------------------
+
+
+def test_reconcile_handler_accepts_hermes_positional_dict_dispatch() -> None:
+    """Hermes's ToolRegistry.run calls handler(args_dict) — one positional dict,
+    NOT handler(**kwargs). A ``def _h(**kwargs)`` handler crashes on real
+    dispatch with "takes 0 positional arguments but 1 was given". The wired
+    backend must accept the positional dict the real registry passes."""
+    from sentinel.plugins.datasource import SqliteTableSource
+    from sentinel.plugins.remediators.hermes_mcp_tools import build_spec_set
+
+    conn = sqlite3.connect(":memory:")
+    with conn:
+        conn.execute("CREATE TABLE orders (id TEXT PRIMARY KEY, status TEXT)")
+        conn.execute("INSERT INTO orders VALUES ('o1','paid')")
+    spec = build_spec_set({"orders": SqliteTableSource(conn, "orders", "id")})
+    # Real dispatch shape: one positional dict.
+    out = spec["reconcile_table_write"].handler(
+        {"table": "orders", "row_id": "o1", "expected": "shipped"}
+    )
+    assert "reconciled" in out, out
+    assert conn.execute("SELECT status FROM orders WHERE id='o1'").fetchone()[0] == "shipped"
+    conn.close()
+
+
+def test_refuse_handler_accepts_hermes_positional_dict_dispatch() -> None:
+    """The fail-closed placeholder must also accept the positional-dict shape so
+    a real Hermes run returns the refusal string, not a crash."""
+    from sentinel.plugins.remediators.hermes_mcp_tools import default_specs
+
+    out = default_specs["reconcile_table_write"].handler(
+        {"table": "orders", "row_id": "o1", "expected": "x"}
+    )
+    assert "refused" in out
+
+
+def test_audit_treats_invoke_time_block_as_not_a_breach() -> None:
+    """A denied tool that the per-thread whitelist BLOCKED at invoke time (the
+    result carries the denial marker) is NOT a fail-open breach — the gate
+    worked. The post-run audit must not flag it. This is the false-positive the
+    first live run surfaced: the model tried search_files/skills_list/terminal,
+    all were blocked, but the old audit cried breach."""
+    from sentinel.plugins.remediators.hermes import (
+        _WHITELIST_DENIAL_MARKER,
+        _tool_call_violations,
+    )
+
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "search_files", "arguments": "{}"},
+                },
+                {
+                    "id": "call_2",
+                    "type": "function",
+                    "function": {"name": "reconcile_table_write", "arguments": "{}"},
+                },
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": f"Tool 'search_files' {_WHITELIST_DENIAL_MARKER}",
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_2",
+            "content": "reconcile_table_write: reconciled orders:o1",
+        },
+    ]
+    # search_files was blocked (denial marker) -> not a breach. reconcile ran
+    # and is in the allowlist -> not a breach. Zero violations.
+    assert _tool_call_violations(messages, {"reconcile_table_write"}) == set()
+
+
+def test_audit_flags_fail_open_when_denied_tool_actually_ran() -> None:
+    """A denied tool whose result lacks the denial marker actually executed
+    (the pre-call gate failed open) — that IS a breach and must be flagged."""
+    from sentinel.plugins.remediators.hermes import _tool_call_violations
+
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "terminal", "arguments": '{"command":"rm -rf /"}'},
+                },
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": "deleted everything",
+        },  # no denial marker -> ran
+    ]
+    assert _tool_call_violations(messages, {"reconcile_table_write"}) == {"terminal"}
+
+
+def test_audit_fail_closed_when_denied_call_has_no_matching_result() -> None:
+    """A denied tool_call with no matching tool result at all is a violation —
+    we cannot prove it was blocked, so fail closed."""
+    from sentinel.plugins.remediators.hermes import _tool_call_violations
+
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_9",
+                    "type": "function",
+                    "function": {"name": "terminal", "arguments": "{}"},
+                }
+            ],
+        },
+        # no tool result for call_9
+    ]
+    assert _tool_call_violations(messages, set()) == {"terminal"}

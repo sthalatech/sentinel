@@ -29,6 +29,10 @@ class DataSource(Protocol):
         """Return ``{row_id: comparable-value-or-hash}`` for one target."""
         ...
 
+    def write_row(self, row_id: str, expected: str) -> int:
+        """Reconcile one row; return the number of rows actually updated."""
+        ...
+
 
 def _hash_row(columns: dict[str, object]) -> str:
     """Return a stable short hash of a row's column->value mapping.
@@ -94,14 +98,20 @@ class SqliteTableSource:
             raise ValueError(f"{self._table!r} has no non-key columns to reconcile")
         return cols
 
-    def write_row(self, row_id: str, expected: str) -> None:
-        """Reconcile exactly one row: set its non-key columns from ``expected``.
+    def write_row(self, row_id: str, expected: str) -> int:
+        """Reconcile exactly one row: set its non-key column from ``expected``.
 
         ``expected`` is the comparable value produced by a source ``snapshot()``.
         For a single non-key column it is written verbatim. For multiple non-key
         columns a bare hash is not reversible, so the write is refused (fail
         closed) — multi-column reconciliation must extend this with an explicit
         value mapping, which is out of scope for the single-row idempotent fix.
+
+        Returns the number of rows actually updated (0 if ``row_id`` does not
+        exist — a no-op, not an error). A live trial showed a real model can
+        hallucinate a row_id on its first call; returning the rowcount lets the
+        handler tell the model "no row matched, try again with the right id"
+        instead of falsely confirming a fix that changed nothing.
         """
         cols = self._non_key_columns()
         if len(cols) != 1:
@@ -111,7 +121,8 @@ class SqliteTableSource:
             )
         col = cols[0]
         with self._conn:
-            self._conn.execute(
+            cur = self._conn.execute(
                 f"UPDATE {self._table} SET {col} = ? WHERE {self._key_column} = ?",
                 (expected, row_id),
             )
+            return int(cur.rowcount or 0)

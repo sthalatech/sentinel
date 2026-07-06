@@ -274,13 +274,32 @@ class HermesRemediator(Remediator):
             return []
 
     def _build_message(self, incident: Incident, allowed: list[str]) -> str:
-        """Compose the headless prompt for this remediation attempt."""
-        return (
+        """Compose the headless prompt for this remediation attempt.
+
+        The prompt names the permitted tools AND, for reconciliation incidents,
+        spells out the exact per-row tool arguments (table/row_id/expected) so a
+        real model calls the tool with the right payload on the first turn
+        rather than guessing or emitting empty arguments. A live trial against a
+        real Hermes instance showed models otherwise call reconcile_table_write
+        with empty args on the first turn; making the args explicit avoids that
+        wasted round-trip.
+        """
+        base = (
             f"Remediate incident {incident.id} (source={incident.source}, "
             f"attempt {incident.attempts}). Context: "
             f"{json.dumps(incident.context, default=str)}. "
             f"Permitted actions: {', '.join(allowed) or 'none (lockdown)'}."
         )
+        mismatches = (
+            incident.context.get("mismatches") if isinstance(incident.context, dict) else None
+        )
+        if isinstance(mismatches, list) and mismatches and "reconcile_table_write" in allowed:
+            rows = ", ".join(_mismatch_row_str(m) for m in mismatches if isinstance(m, dict))
+            base += (
+                " For each mismatch, call the reconcile_table_write tool with "
+                f"those exact arguments: {rows}. Do not ask questions; call the tool."
+            )
+        return base
 
 
 def _serialize_history(messages: list[dict[str, Any]]) -> str:
@@ -288,22 +307,66 @@ def _serialize_history(messages: list[dict[str, Any]]) -> str:
     return json.dumps(messages, default=str)
 
 
-def _tool_call_violations(messages: list[dict[str, Any]], allowlist: set[str]) -> set[str]:
-    """Return tool names invoked in ``messages`` that are not in ``allowlist``.
+def _mismatch_row_str(m: dict[str, Any]) -> str:
+    """Format one mismatch as the exact tool-arg dict the model should call."""
+    return (
+        "{table: "
+        + str(m.get("table"))
+        + ", row_id: "
+        + str(m.get("row_id"))
+        + ", expected: "
+        + str(m.get("expected"))
+        + "}"
+    )
 
-    Scans OpenAI-style assistant messages for ``tool_calls`` (each
-    ``{"function": {"name": ...}}``) — the exact shape Hermes writes into its
-    conversation history (verified in hermes-agent's ``message_sanitization.py``).
-    This is the post-run audit check: Hermes's pre-call gate
-    (``get_pre_tool_call_block_message``) is wrapped in ``try/except Exception``
-    that defaults to allowing the call through in both ``model_tools.py`` and
-    ``agent/tool_executor.py`` of the real installed package — so a denied tool
-    can execute if the gate throws. Catching it in the message history turns a
-    silent fail-open into a recorded breach.
 
-    Fail-closed: a tool_call whose function name is missing/unparseable is
-    treated as a violation (we cannot prove it was allowed).
+#: Marker Hermes's per-thread tool whitelist writes into the tool result when
+#: it blocks a denied tool at invoke time (hermes_cli/plugins.py
+#: ``set_thread_tool_whitelist`` / ``get_pre_tool_call_block_message``). A
+#: denied tool whose result carries this marker was BLOCKED, not fail-opened.
+_WHITELIST_DENIAL_MARKER = "denied: not in this thread's tool whitelist"
+
+
+def _index_tool_results(messages: list[dict[str, Any]]) -> dict[str, str]:
+    """Index ``tool`` role messages by ``tool_call_id`` for pairing with calls.
+
+    Hermes writes one ``{"role":"tool","tool_call_id":...,"content":...}`` per
+    tool call immediately after the assistant message holding the tool_calls.
     """
+    out: dict[str, str] = {}
+    for msg in messages or []:
+        if isinstance(msg, dict) and msg.get("role") == "tool":
+            cid = msg.get("tool_call_id")
+            if isinstance(cid, str):
+                out[cid] = str(msg.get("content") or "")
+    return out
+
+
+def _was_blocked_at_invoke(result: str) -> bool:
+    """True if the tool result is the per-thread whitelist's denial marker.
+
+    Defense-in-depth (``set_thread_tool_whitelist``) blocks a denied tool BEFORE
+    its handler runs and writes this marker into the result — that is the gate
+    working, not a fail-open breach.
+    """
+    return _WHITELIST_DENIAL_MARKER in result
+
+
+def _tool_call_violations(messages: list[dict[str, Any]], allowlist: set[str]) -> set[str]:
+    """Return denied tool names that actually ran (fail-open), not blocked ones.
+
+    Post-run audit: Hermes's pre-call gate is wrapped in ``try/except`` that
+    defaults to allowing the call through, so a denied tool can execute if the
+    gate throws. Catching that in the message history turns a silent fail-open
+    into a recorded breach. Defense-in-depth (per-thread whitelist) blocks a
+    denied tool before its handler runs and writes the denial marker into the
+    tool result — that is the gate working, NOT a breach. Pair each tool_call
+    with its tool result by ``tool_call_id`` to tell blocked from fail-open.
+
+    Fail-closed: an unparseable name or a denied call with no matching tool
+    result is a violation (we cannot prove it was blocked).
+    """
+    tool_results = _index_tool_results(messages)
     violations: set[str] = set()
     for msg in messages or []:
         if not isinstance(msg, dict):
@@ -312,16 +375,27 @@ def _tool_call_violations(messages: list[dict[str, Any]], allowlist: set[str]) -
         if not isinstance(tool_calls, list):
             continue
         for tc in tool_calls:
-            if not isinstance(tc, dict):
-                continue
-            fn = tc.get("function")
-            name = fn.get("name") if isinstance(fn, dict) else None
-            if not isinstance(name, str) or not name:
+            name = _tool_call_name(tc)
+            if name is None:
                 violations.add("<unknown-tool>")
                 continue
-            if name not in allowlist:
-                violations.add(name)
+            if name in allowlist:
+                continue
+            cid = tc.get("id") if isinstance(tc, dict) else None
+            result = tool_results.get(cid, "") if isinstance(cid, str) else ""
+            if _was_blocked_at_invoke(result):
+                continue  # blocked before the handler ran — not a breach
+            violations.add(name)
     return violations
+
+
+def _tool_call_name(tool_call: Any) -> str | None:
+    """Extract the function name from an OpenAI-style tool_call, or None."""
+    if not isinstance(tool_call, dict):
+        return None
+    fn = tool_call.get("function")
+    name = fn.get("name") if isinstance(fn, dict) else None
+    return name if isinstance(name, str) and name else None
 
 
 def _default_config_loader() -> dict[str, Any]:
