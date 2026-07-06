@@ -1,6 +1,13 @@
-# Sentinel Loop example policy.
+# Sentinel Loop example policy - Odoo-focused.
+#
 # This is an illustration; copy it, tune it to your environment, and reference
 # it from your live config via the AGT_POLICY_PATH environment variable.
+#
+# Action names come from the remediation actionbook (config/actions.example.yml
+# -> copy to config/actions.yml). The actionbook is declarative: a community
+# user adds an environment-specific remediation by appending a block there and
+# listing the new action name below - no code change. Validate both together:
+#   sentinel actions validate config/actions.yml
 #
 # The policy references trust levels defined in governance/agentaz.example.json.
 # When global trust drops to A1 the loop enters lockdown and only escalates.
@@ -10,24 +17,26 @@ policy:
   trust_ladder: "governance/agentaz.example.json"
 
   # Actions the active remediator may attempt without extra approval.
+  # Names must match an action in config/actions.yml.
   tool_allowlist:
-    - restart_workflow      # re-trigger a failed Temporal / GitHub Actions run
-    - reconcile_table_write # idempotently fix a mismatched row
-    - clear_cache           # warm caches can be rebuilt cheaply
-    - retry_webhook         # transient delivery failures
+    - requeue_queue_job        # requeue a stuck OCA queue.job
+    - retry_mail_queue         # retry an outgoing mail.mail in exception/outgoing
+    - reset_cron_lock          # release an ir.cron stuck running
+    - recompute_stored_field   # invariant-safe reconcile of a drifted computed field
 
   # Actions that always require explicit human approval, regardless of trust.
+  # These carry blast_radius: high in the actionbook; the remediator refuses to
+  # surface them at A4 even if a typo lists them in tool_allowlist above.
   require_approval:
-    - terminate_process
-    - roll_back_deployment
-    - delete_resource
+    - reset_posted_invoice     # account.move.button_draft - touches the legal ledger
+    - uninstall_module         # ir.module.module uninstall - deletes data
 
   # Trust-level-specific approval gates.
   # Anything listed here is blocked unless approved by a human in the tracker.
   approval_gates:
     A4: []                                    # routine autonomy
-    A3: [roll_back_deployment]                # broader tools need a second look
-    A2: [scale_resource, terminate_process]  # impactful actions need approval
+    A3: [reconcile_move_line]                 # touches accounting entries
+    A2: [scale_resource, run_stock_scheduler] # impactful ops need approval
     A1: []                                    # lockdown: no tools run
 
   # How the global trust level reacts to unresolved incidents.

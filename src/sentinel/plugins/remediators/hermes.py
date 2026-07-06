@@ -160,14 +160,35 @@ class HermesRemediator(Remediator):
         spec_set: dict[str, Any] | None = None,
         registrar: Any = None,
         run_timeout_s: float = DEFAULT_RUN_TIMEOUT_S,
+        actionbook_path: str | None = None,
+        odoo_client: Any = None,
     ) -> None:
         self._client_factory = client_factory
         self._enforcer = enforcer
         self._trust_store = trust_store
-        self._actions: tuple[str, ...] = actions if actions is not None else DEFAULT_ACTIONS
         self._docker_check = docker_check
         self._config_loader = config_loader or _default_config_loader
-        self._spec_set = spec_set if spec_set is not None else build_spec_set()
+        # Actionbook (YAML) path takes precedence over the hardcoded
+        # DEFAULT_ACTIONS/default_specs when supplied: it lets a deployment add
+        # environment-specific remediations without code change (see
+        # config/actions.example.yml and the actionbook module). When an
+        # actionbook is supplied, the action NAMES and their specs both come from
+        # it, so ``actions`` and ``spec_set`` must not also be set — that mix is
+        # ambiguous and is refused rather than silently merged.
+        if actionbook_path is not None and spec_set is not None:
+            raise HermesRefusedError(
+                "spec_set and actionbook_path are mutually exclusive; an actionbook "
+                "defines its own specs, so passing both is ambiguous"
+            )
+        if actionbook_path is not None:
+            from sentinel.plugins.remediators.actionbook import load_actionbook
+
+            book_specs = load_actionbook(actionbook_path, odoo_client=odoo_client)
+            self._spec_set = book_specs
+            self._actions: tuple[str, ...] = tuple(book_specs.keys())
+        else:
+            self._actions = actions if actions is not None else DEFAULT_ACTIONS
+            self._spec_set = spec_set if spec_set is not None else build_spec_set()
         if run_timeout_s <= 0 or run_timeout_s >= 90:
             raise HermesRefusedError(
                 f"run_timeout_s must be > 0 and < 90s (got {run_timeout_s}); "

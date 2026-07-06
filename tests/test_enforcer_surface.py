@@ -47,10 +47,10 @@ def test_allowed_actions_a4_surface() -> None:
     """allowed_actions returns the A4 permitted-without-approval set."""
     enf = AGTEnforcer(policy_path=POLICY, trust_store=_FakeTrustStore("A4"))
     assert set(enf.allowed_actions("A4")) == {
-        "restart_workflow",
-        "reconcile_table_write",
-        "clear_cache",
-        "retry_webhook",
+        "requeue_queue_job",
+        "retry_mail_queue",
+        "reset_cron_lock",
+        "recompute_stored_field",
     }
 
 
@@ -61,11 +61,10 @@ def test_allowed_actions_a1_lockdown_is_empty() -> None:
 
 
 def test_allowed_actions_a3_includes_scale_and_rollback() -> None:
-    """A3 broadens the surface to scale_resource and roll_back_deployment."""
+    """A3 broadens the surface to reconcile_move_line."""
     enf = AGTEnforcer(policy_path=POLICY, trust_store=_FakeTrustStore("A3"))
     actions = set(enf.allowed_actions("A3"))
-    assert "scale_resource" in actions
-    assert "roll_back_deployment" in actions
+    assert "reconcile_move_line" in actions
 
 
 def test_noop_enforcer_allowed_actions_is_empty() -> None:
@@ -82,7 +81,7 @@ def test_authorize_mirrors_into_audit_chain() -> None:
         trust_store=_FakeTrustStore("A4"),
         audit=audit,
     )
-    enf.authorize("restart_workflow")
+    enf.authorize("requeue_queue_job")
     enf.authorize("launch_missiles")
     assert len(sink.entries) == 2
     assert sink.entries[0].kind == "enforcement"
@@ -95,4 +94,4 @@ def test_authorize_mirrors_into_audit_chain() -> None:
 def test_authorize_without_audit_does_not_raise() -> None:
     """No audit wired => authorize still works, nothing mirrored."""
     enf = AGTEnforcer(policy_path=POLICY, trust_store=_FakeTrustStore("A4"))
-    assert enf.authorize("restart_workflow") == Decision.ALLOW
+    assert enf.authorize("requeue_queue_job") == Decision.ALLOW

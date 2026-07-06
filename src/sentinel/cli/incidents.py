@@ -137,6 +137,55 @@ def _handle_trust_reset(args: argparse.Namespace) -> None:
     print(f"trust reset to {args.level}")
 
 
+def _handle_actions_validate(args: argparse.Namespace) -> None:
+    """Validate a remediation actionbook without loading it into a remediator.
+
+    Catches typo'd backend names, lock/prompt overlaps, undeclared params, and
+    bad blast-radius tiers before the actionbook is pointed at a live remediator
+    -- exactly like odoo-synth rules validate does for the masking rulebook.
+    Exits non-zero on any validation error so it is CI-usable.
+    """
+    from sentinel.plugins.remediators.actionbook import validate_actionbook
+
+    result = validate_actionbook(args.path)
+    if result.warnings:
+        for w in result.warnings:
+            print(f"warn: {w}")
+    if result.errors:
+        for e in result.errors:
+            print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"actionbook OK: {args.path}")
+
+
+def _handle_actions_list(args: argparse.Namespace) -> None:
+    """List the action names an actionbook declares (for policy-authoring help).
+
+    Prints each action with its backend and blast-radius tier, so a user writing
+    governance/policy.example.yaml can see which names to put in which trust
+    level's allowed_actions without opening the YAML.
+    """
+    import yaml
+
+    from sentinel.plugins.remediators.actionbook import validate_actionbook
+
+    result = validate_actionbook(args.path)
+    if not result.ok:
+        for e in result.errors:
+            print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+    raw = yaml.safe_load(pathlib.Path(args.path).read_text(encoding="utf-8")) or {}
+    backends = raw.get("backends") or {}
+    actions = raw.get("actions") or {}
+    for name, adef in actions.items():
+        backend = adef.get("backend", "?") if isinstance(adef, dict) else "?"
+        blast = adef.get("blast_radius", "?") if isinstance(adef, dict) else "?"
+        bdesc = ""
+        if isinstance(backends.get(backend), dict):
+            bdesc = backends[backend].get("description", "")
+        print(f"{name}\tbackend={backend}\tblast={blast}\t{bdesc}")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the argparse parser with the incidents subcommand tree."""
     parser = argparse.ArgumentParser(prog="sentinel", description="Sentinel Loop CLI")
@@ -171,6 +220,15 @@ def _build_parser() -> argparse.ArgumentParser:
     reset.add_argument("level", help="Target trust level, e.g. A4.")
     reset.add_argument("--reason", required=True)
     reset.set_defaults(handler=_handle_trust_reset)
+
+    actions = top.add_parser("actions", help="Validate/list the remediation actionbook.")
+    actions_sub = actions.add_subparsers(dest="actions_command", required=True)
+    validate = actions_sub.add_parser("validate", help="Validate an actionbook YAML file.")
+    validate.add_argument("path", help="Path to the actionbook YAML.")
+    validate.set_defaults(handler=_handle_actions_validate)
+    listing = actions_sub.add_parser("list", help="List action names an actionbook declares.")
+    listing.add_argument("path", help="Path to the actionbook YAML.")
+    listing.set_defaults(handler=_handle_actions_list)
 
     return parser
 

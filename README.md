@@ -107,10 +107,30 @@ reopens them through the single write path.
 ## Remediation actions
 
 The Hermes remediator exposes one narrow tool per governance action (see
-`docs/SECURITY.md`). `reconcile_table_write` reconciles one mismatched DB row
-to its canonical value — it only supports tables with a single non-key column
-today; multi-column reconciliation is refused until an explicit value mapping is
-added.
+`docs/SECURITY.md`). Actions are **declarative**: a community user defines them
+in a YAML *actionbook* (`config/actions.example.yml` → copy to
+`config/actions.yml`) and the remediator builds a narrow per-action tool from it
+with **no code change**. This mirrors odoodb-synth's rulebook
+(https://github.com/sthalatech/odoodb-synth `rules/`): a backend vocabulary
+(named remediation primitives, each with an invoke mechanism + parameter schema)
+plus action assignments (named actions that bind a backend and **lock** identity
+parameters while **prompting** only safe per-call inputs). Adding an
+environment-specific remediation = appending a YAML block and listing the action
+name in `governance/policy.example.yaml`.
+
+The shipped example is Odoo-focused: `requeue_queue_job`, `retry_mail_queue`,
+`reset_cron_lock`, `recompute_stored_field` (autonomous), `reconcile_move_line`,
+`run_stock_scheduler` (approval-gated), `reset_posted_invoice`,
+`uninstall_module` (policy-only). `recompute_stored_field` is the
+invariant-safe replacement for a raw row write: it recomputes a drifted stored
+computed field via the Odoo ORM so dependents and constraints stay consistent.
+
+Validate an actionbook before first use (CI-usable, exits non-zero on errors):
+
+```bash
+sentinel actions validate config/actions.yml
+sentinel actions list config/actions.yml
+```
 
 ## CLI usage
 

@@ -1,0 +1,124 @@
+# Sentinel remediation actionbook - Odoo-focused.
+#
+# This is the remediator's analogue of odoodb-synth's rulebook
+# (https://github.com/sthalatech/odoodb-synth rules/). odoodb-synth separates a
+# *strategy vocabulary* (named masking strategies, each with a sql_template)
+# from *field assignments* (model.field: { strategy: name }). Adding a masking
+# rule = a YAML edit. This file separates a *backend vocabulary* (named
+# remediation primitives) from *action assignments* (named remediation actions
+# that bind a backend and lock most of its parameters). Adding a remediation =
+# a YAML edit. No code change.
+#
+# Copy to config/actions.yml, tune to your instance, point the remediator at it
+# via remediator kwargs: { actionbook_path: "config/actions.yml", odoo_client: ... }.
+# Validate it before first use:
+#   sentinel actions validate config/actions.yml
+#
+# Why locked vs prompted parameters is the enforcement boundary:
+# A backend like odoo_method accepts model, method, ids. If the model could set
+# all three it could call ANY method on ANY model - that is the shell-surface
+# problem again. So each action LOCKS the identity parameters (model, method)
+# to literals the model cannot change and PROMPTS only the safe per-call inputs
+# (ids). The generated tool schema exposes ONLY the prompted parameters
+# (additionalProperties: false), so the model's tool surface is exactly the
+# narrow per-call input - it can neither see nor set the locked identity.
+# Denying the action at the trust ladder (governance/policy.example.yaml) means
+# its toolset is never enabled, so the locked operation is unreachable.
+
+# 1. Backend vocabulary - the reusable remediation primitives. Each names a
+#    fixed invoke mechanism + the narrow parameters it accepts (those parameters
+#    become the LLM tool's schema). A new mechanism needs a backend type added
+#    in code (actionbook.py _INVOKE_MECHANISMS); a new use of an existing
+#    mechanism is YAML only.
+backends:
+  odoo_method:
+    description: Call one Odoo ORM model method on a bounded id list.
+    invoke: odoo_method
+    params:
+      model:  { type: string, description: "Odoo model name, e.g. queue.job" }
+      method: { type: string, description: "Bound method name, e.g. requeue_job" }
+      ids:    { type: array, items: { type: integer }, description: "Record ids to act on (bounded)" }
+    require: [model, method, ids]
+
+  odoo_recompute:
+    description: Recompute one stored field on a bounded domain (invariant-safe reconcile).
+    invoke: odoo_recompute
+    params:
+      model:  { type: string }
+      field:  { type: string, description: "Stored computed field to recompute" }
+      domain: { type: array, description: "Odoo domain, bounded" }
+    require: [model, field, domain]
+
+# 2. Actions - named remediations the model may call. Each binds a backend and
+#    locks identity params / prompts per-call inputs. blast_radius is a SECOND
+#    guard beyond the trust ladder: a high-blast action is refused at A4 even
+#    if a policy typo lists it there.
+actions:
+  requeue_queue_job:
+    description: Requeue one stuck OCA queue.job (failed/done) by id.
+    backend: odoo_method
+    lock:    { model: queue.job, method: requeue_job }
+    prompt:  [ids]
+    blast_radius: low
+
+  retry_mail_queue:
+    description: Retry sending one outgoing mail.mail stuck in exception/outgoing.
+    backend: odoo_method
+    lock:    { model: mail.mail, method: send }
+    prompt:  [ids]
+    blast_radius: low
+
+  reset_cron_lock:
+    description: Release one ir.cron stuck in a perpetual running state.
+    backend: odoo_method
+    lock:    { model: ir.cron, method: _reset_running_state }
+    prompt:  [ids]
+    blast_radius: low
+
+  recompute_stored_field:
+    description: Recompute one drifted stored computed field on a bounded domain.
+    backend: odoo_recompute
+    prompt:  [model, field, domain]
+    blast_radius: low
+
+  reconcile_move_line:
+    description: Reconcile a bounded set of account.move.line records.
+    backend: odoo_method
+    lock:    { model: account.move.line, method: reconcile }
+    prompt:  [ids]
+    blast_radius: medium
+
+  run_stock_scheduler:
+    description: Re-run procurement assignment for a bounded stock.move domain.
+    backend: odoo_recompute
+    lock:    { field: availability_state }
+    prompt:  [model, domain]
+    blast_radius: medium
+
+  # Policy-only actions (never autonomous). blast_radius: high means the
+  # remediator refuses to surface these at A4 even if a policy typo lists them;
+  # they must ONLY appear in governance/policy.example.yaml's require_approval.
+  reset_posted_invoice:
+    description: Reset a posted invoice to draft (touches the legal ledger).
+    backend: odoo_method
+    lock:    { model: account.move, method: button_draft }
+    prompt:  [ids]
+    blast_radius: high
+
+  uninstall_module:
+    description: Uninstall an ir.module.module (deletes data, breaks dependencies).
+    backend: odoo_method
+    lock:    { model: ir.module.module, method: button_immediate_uninstall }
+    prompt:  [ids]
+    blast_radius: high
+
+# To add an environment-specific remediation (e.g. a custom integration queue),
+# append a block under actions and add the action name to the A4 allowed_actions
+# in your policy.yaml. Zero code change. Example:
+#
+#   reset_custom_integration_queue:
+#     description: Reset one custom.integration.queue job stuck in 'error'.
+#     backend: odoo_method
+#     lock:    { model: custom.integration.queue, method: action_reset }
+#     prompt:  [ids]
+#     blast_radius: low

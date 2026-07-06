@@ -1,47 +1,46 @@
 {
   "trust_levels": {
     "A4": {
-      "description": "Fully autonomous routine remediation.",
+      "description": "Fully autonomous routine Odoo remediation.",
       "allowed_actions": [
-        "restart_workflow",
-        "reconcile_table_write",
-        "clear_cache",
-        "retry_webhook"
+        "requeue_queue_job",
+        "retry_mail_queue",
+        "reset_cron_lock",
+        "recompute_stored_field"
       ],
       "require_approval_for": [],
-      "worst_case_action": "restart_workflow",
+      "worst_case_action": "recompute_stored_field",
       "demotion": "global"
     },
     "A3": {
-      "description": "Autonomous with broader tool access and logs review.",
+      "description": "Autonomous with accounting remediation access.",
       "allowed_actions": [
-        "restart_workflow",
-        "reconcile_table_write",
-        "clear_cache",
-        "retry_webhook",
-        "scale_resource",
-        "roll_back_deployment"
+        "requeue_queue_job",
+        "retry_mail_queue",
+        "reset_cron_lock",
+        "recompute_stored_field",
+        "reconcile_move_line"
       ],
       "require_approval_for": [
-        "roll_back_deployment"
+        "reconcile_move_line"
       ],
-      "worst_case_action": "roll_back_deployment",
+      "worst_case_action": "reconcile_move_line",
       "demotion": "global"
     },
     "A2": {
-      "description": "Human approval required for impactful actions.",
+      "description": "Human approval required for impactful Odoo operations.",
       "allowed_actions": [
-        "restart_workflow",
-        "reconcile_table_write",
-        "clear_cache",
-        "retry_webhook"
+        "requeue_queue_job",
+        "retry_mail_queue",
+        "reset_cron_lock",
+        "recompute_stored_field"
       ],
       "require_approval_for": [
-        "scale_resource",
-        "roll_back_deployment",
-        "terminate_process"
+        "run_stock_scheduler",
+        "reset_posted_invoice",
+        "uninstall_module"
       ],
-      "worst_case_action": "terminate_process",
+      "worst_case_action": "run_stock_scheduler",
       "demotion": "global"
     },
     "A1": {

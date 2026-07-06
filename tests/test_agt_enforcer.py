@@ -29,13 +29,13 @@ class _FakeTrustStore:
 def test_allow_for_allowlisted_action_at_a4() -> None:
     """An action in A4's allowed_actions returns ALLOW."""
     enf = AGTEnforcer(policy_path=POLICY, trust_store=_FakeTrustStore("A4"))
-    assert enf.authorize("restart_workflow") == Decision.ALLOW
+    assert enf.authorize("requeue_queue_job") == Decision.ALLOW
 
 
 def test_require_approval_for_roll_back_at_a3_per_level_gate() -> None:
-    """roll_back_deployment is in A3's require_approval_for, so gate it."""
+    """reconcile_move_line is in A3's require_approval_for, so gate it."""
     enf = AGTEnforcer(policy_path=POLICY, trust_store=_FakeTrustStore("A3"))
-    assert enf.authorize("roll_back_deployment") == Decision.REQUIRE_APPROVAL
+    assert enf.authorize("reconcile_move_line") == Decision.REQUIRE_APPROVAL
 
 
 def test_deny_for_unlisted_action_at_current_level() -> None:
@@ -45,17 +45,17 @@ def test_deny_for_unlisted_action_at_current_level() -> None:
 
 
 def test_require_approval_for_delete_resource_at_any_level_global_gate() -> None:
-    """delete_resource is in policy require_approval, gated at every level."""
+    """reset_posted_invoice is in policy require_approval, gated at every level."""
     for level in ("A4", "A3", "A2"):
         enf = AGTEnforcer(policy_path=POLICY, trust_store=_FakeTrustStore(level))
-        assert enf.authorize("delete_resource") == Decision.REQUIRE_APPROVAL
+        assert enf.authorize("reset_posted_invoice") == Decision.REQUIRE_APPROVAL
 
 
 def test_deny_for_every_action_at_a1_lockdown() -> None:
     """At A1 lockdown, every action is DENY (empty allowed_actions)."""
     enf = AGTEnforcer(policy_path=POLICY, trust_store=_FakeTrustStore("A1"))
-    assert enf.authorize("restart_workflow") == Decision.DENY
-    assert enf.authorize("clear_cache") == Decision.DENY
+    assert enf.authorize("requeue_queue_job") == Decision.DENY
+    assert enf.authorize("retry_mail_queue") == Decision.DENY
 
 
 def test_construction_fails_loud_on_missing_policy() -> None:
