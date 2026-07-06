@@ -302,12 +302,48 @@ def register_action_tools(
         registrar.register(
             name=action,
             toolset=toolset,
-            schema=spec.schema,
+            # Emit the OpenAI tool-schema shape Hermes's registry surfaces to
+            # the model: a ``function`` schema carries its arguments under a
+            # ``parameters`` key (see tools/terminal_tool.py TERMINAL_SCHEMA:
+            # {"name": ..., "description": ..., "parameters": {"type":"object",
+            # "properties":..., "required":...}}). The spec's internal
+            # ``schema`` is the bare parameters dict ("properties"/"required"/
+            # "additionalProperties") — registering it as-is leaves the tool
+            # with NO ``parameters`` key, so Hermes's OpenAI-format builder
+            # (registry.get_definitions wraps as {"type":"function",
+            # "function": schema_with_name}) presents a tool with an empty
+            # argument schema. A real model then either cannot call it or has
+            # its arguments stripped before dispatch: the handler receives an
+            # empty dict and refuses with "expected {table,row_id,expected} as
+            # strings" — exactly what the GLM-5.2 live trial caught. Wrapping
+            # here (not on the spec, so tests asserting spec.schema["properties"]
+            # still hold) surfaces the real narrow parameters to the model and
+            # routes the parsed args to the handler.
+            schema=_to_openai_function_schema(action, spec),
             handler=spec.handler,
             description=spec.description,
         )
         record.registered[action] = toolset
     return record
+
+
+def _to_openai_function_schema(action: str, spec: ActionToolSpec) -> dict[str, Any]:
+    """Return the OpenAI tool-schema shape Hermes surfaces to the model.
+
+    The spec's ``schema`` is the bare JSON-schema for the arguments (the
+    ``parameters`` body); Hermes's registry expects the full function envelope
+    (``name`` + ``description`` + ``parameters``), matching how its built-in
+    tools register (e.g. terminal_tool.py TERMINAL_SCHEMA). We build that
+    envelope here so the model sees the real narrow argument schema and the
+    runtime routes parsed args into the handler.
+    """
+    params = dict(spec.schema)
+    # Defensive: if a caller already passed a full envelope (has "parameters"),
+    # don't double-wrap. The default specs are bare argument schemas, so this
+    # branch is the normal path.
+    if "properties" in params or "required" in params or "type" in params:
+        return {"name": action, "description": spec.description, "parameters": params}
+    return params
 
 
 def toolsets_for_actions(actions: list[str]) -> list[str]:
