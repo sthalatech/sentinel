@@ -497,3 +497,40 @@ def test_write_row_returns_rowcount_for_real_fix(tmp_path) -> None:
     assert src.write_row("o1", "shipped") == 1
     assert src.write_row("missing", "shipped") == 0
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Second-live-trial finding A: the real HermesAIAgentClient runs run_conversation
+# (and therefore the reconcile tool handler) in a WORKER thread for the
+# per-incident timeout. A sqlite3 connection is bound to its creating thread, so
+# a handler running in the worker raises "SQLite objects created in a thread can
+# only be used in that same thread". Callers must open connections with
+# check_same_thread=False. This test pins that cross-thread write works.
+# ---------------------------------------------------------------------------
+
+
+def test_sqlite_source_write_works_across_threads(tmp_path) -> None:
+    """A check_same_thread=False connection lets the reconcile handler write
+    from a worker thread — the shape the real Hermes client runs handlers in."""
+    import threading
+
+    conn = sqlite3.connect(str(tmp_path / "t.db"), check_same_thread=False)
+    conn.execute("CREATE TABLE orders (id TEXT PRIMARY KEY, status TEXT)")
+    conn.execute("INSERT INTO orders VALUES ('o2','paid')")
+    conn.commit()
+    src = SqliteTableSource(conn, "orders", "id")
+    err: list[str] = []
+
+    def _worker() -> None:
+        try:
+            changed = src.write_row("o2", "shipped")
+            assert changed == 1
+        except Exception as exc:  # noqa: BLE001
+            err.append(repr(exc))
+
+    t = threading.Thread(target=_worker)
+    t.start()
+    t.join()
+    assert not err, err
+    assert conn.execute("SELECT status FROM orders WHERE id='o2'").fetchone()[0] == "shipped"
+    conn.close()

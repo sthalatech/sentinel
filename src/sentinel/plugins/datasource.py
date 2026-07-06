@@ -59,6 +59,15 @@ class SqliteTableSource:
     """
 
     def __init__(self, connection: sqlite3.Connection, table: str, key_column: str) -> None:
+        # A sentinel remediator's real Hermes client runs the model + tool
+        # handlers in a WORKER thread (per-incident timeout), so a connection
+        # bound to its creating thread raises "SQLite objects created in a
+        # thread can only be used in that same thread" when the handler runs.
+        # Callers that wire a SqliteTableSource into a reconcile tool must pass
+        # a connection opened with check_same_thread=False (the second live
+        # trial caught this). We do not force the flag here because the detector
+        # and verifier use the same connection from the main thread too, and
+        # both modes are safe for serialized single-row access.
         self._conn = connection
         self._table = self._validate_identifier(table)
         self._key_column = self._validate_identifier(key_column)

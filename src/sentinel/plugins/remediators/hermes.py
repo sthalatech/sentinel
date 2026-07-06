@@ -70,6 +70,14 @@ DEFAULT_ACTIONS: tuple[str, ...] = (
     "roll_back_deployment",
 )
 
+#: Per-incident wall-clock bound on one Hermes turn. The first live trial's runs
+#: (36s/52s/57s) showed none was HIT — but none was ENFORCED either, so a hung
+#: model call (provider stall, a wedged tool backend) would hold the run_once
+#: tick open indefinitely. 75s leaves headroom under the 90s ceiling the
+#: ``__init__`` check enforces while still covering a normal one-tool turn plus a
+#: short follow-up against a real model.
+DEFAULT_RUN_TIMEOUT_S: float = 75.0
+
 
 class HermesClient(Protocol):
     """Abstracted Hermes AIAgent surface so tests can inject a fake."""
@@ -86,6 +94,7 @@ class HermesClient(Protocol):
         tool_allowlist: set[str] | None,
         skip_memory: bool,
         conversation_history: list[dict[str, Any]] | None,
+        timeout_s: float | None,
     ) -> HermesRunResult:
         """Run one headless turn under a per-tool-name invoke-time allowlist.
 
@@ -94,6 +103,13 @@ class HermesClient(Protocol):
         ``set_thread_tool_whitelist`` so a denied action's tool is blocked at
         invoke time even if it somehow surfaced in the registry. ``None`` means
         no invoke-time gate (lockdown runs with an empty toolset need no gate).
+
+        ``timeout_s`` bounds the wall-clock turn: a real model call that hangs
+        (provider stall, a tool whose backend wedged) must not hold the run_once
+        tick open indefinitely. The caller (``HermesRemediator.remediate``)
+        converts a ``TimeoutError`` raised here into a failed ``Result`` so the
+        engine's normal attempts/escalation path handles it — never a raw
+        exception that crashes the tick.
         """
         ...
 
@@ -143,6 +159,7 @@ class HermesRemediator(Remediator):
         config_loader: Callable[[], dict[str, Any]] | None = None,
         spec_set: dict[str, Any] | None = None,
         registrar: Any = None,
+        run_timeout_s: float = DEFAULT_RUN_TIMEOUT_S,
     ) -> None:
         self._client_factory = client_factory
         self._enforcer = enforcer
@@ -151,6 +168,13 @@ class HermesRemediator(Remediator):
         self._docker_check = docker_check
         self._config_loader = config_loader or _default_config_loader
         self._spec_set = spec_set if spec_set is not None else build_spec_set()
+        if run_timeout_s <= 0 or run_timeout_s >= 90:
+            raise HermesRefusedError(
+                f"run_timeout_s must be > 0 and < 90s (got {run_timeout_s}); "
+                "a per-incident turn must be bounded under 90s so a hung model "
+                "call cannot hold the run_once tick open"
+            )
+        self._run_timeout_s = run_timeout_s
         self._verify_startup()
         self._register_tools(registrar)
 
@@ -189,34 +213,42 @@ class HermesRemediator(Remediator):
         register_action_tools(reg, self._spec_set)
 
     def remediate(self, incident: Incident, enforcer: Enforcer) -> Result:
-        """Resolve the trust surface, verify it, then run one Hermes turn."""
+        """Resolve the trust surface, verify it, then run one bounded Hermes turn.
+
+        The turn is bounded by ``self._run_timeout_s``: a real model call that
+        hangs (provider stall, a wedged tool backend) raises ``TimeoutError``
+        from ``client.run`` and is converted here into a FAILED ``Result`` — not
+        a raw exception — so the engine's normal attempts/escalation path in
+        ``core/engine.py`` handles it (verify stays False -> demote/escalate per
+        ``max_attempts``), and the run_once tick never crashes on a hang.
+        """
         allowed = enforcer.allowed_actions(self._trust_store.get_trust())
         toolsets = self._resolve_toolsets(allowed)
         client = self._client_factory()
         self._verify_tool_surface(client, toolsets, allowed, incident.id)
         history = self._load_history(incident)
         message = self._build_message(incident, allowed)
-        run_result = client.run(
-            message,
-            enabled_toolsets=toolsets,
-            tool_allowlist=set(allowed) if allowed else None,
-            skip_memory=True,
-            conversation_history=history or None,
-        )
-        incident.external_refs["conversation"] = _serialize_history(run_result.messages)
-        allowlist = set(allowed) if allowed else set()
-        violations = _tool_call_violations(run_result.messages, allowlist)
-        if violations:
-            names = ", ".join(sorted(violations))
+        try:
+            run_result = client.run(
+                message,
+                enabled_toolsets=toolsets,
+                tool_allowlist=set(allowed) if allowed else None,
+                skip_memory=True,
+                conversation_history=history or None,
+                timeout_s=self._run_timeout_s,
+            )
+        except TimeoutError as exc:
             return Result(
                 success=False,
                 summary=(
-                    f"policy-enforcement breach: denied tool(s) invoked despite "
-                    f"allowlist: {names}"
+                    f"hermes turn timed out after {self._run_timeout_s}s: {exc}; "
+                    f"incident left for the attempts/escalation path"
                 ),
-                breach=True,
             )
-        return Result(success=True, summary=run_result.final_response[:200] or "hermes ran")
+        except RuntimeError as exc:
+            return _abort_result(exc)
+        incident.external_refs["conversation"] = _serialize_history(run_result.messages)
+        return _audit_result(run_result, allowed)
 
     def _resolve_toolsets(self, allowed: list[str]) -> list[str]:
         """Map allowed governance actions to their per-action Hermes toolsets.
@@ -300,6 +332,70 @@ class HermesRemediator(Remediator):
                 f"those exact arguments: {rows}. Do not ask questions; call the tool."
             )
         return base
+
+
+def _abort_result(exc: Exception) -> Result:
+    """Convert a non-retryable Hermes abort into a FAILED Result.
+
+    Hermes aborted the turn without completing (HTTP 402/401/billing,
+    content-policy block, max-retries exceeded). The real client raises
+    ``RuntimeError`` for these so a billing failure is NOT recorded as
+    success=True (fail-open the second live trial caught on HTTP 402). A FAILED
+    Result lets the engine's attempts/escalation path handle it — never a raw
+    exception that crashes the run_once tick.
+    """
+    return Result(success=False, summary=f"hermes turn aborted (not completed): {exc}")
+
+
+def _audit_result(run_result: HermesRunResult, allowed: list[str]) -> Result:
+    """Post-run audit: flag a breach, a no-op, or record a real success."""
+    allowlist = set(allowed) if allowed else set()
+    violations = _tool_call_violations(run_result.messages, allowlist)
+    if violations:
+        names = ", ".join(sorted(violations))
+        return Result(
+            success=False,
+            summary=(
+                "policy-enforcement breach: denied tool(s) invoked despite " f"allowlist: {names}"
+            ),
+            breach=True,
+        )
+    if _was_noop(run_result):
+        # The model returned no tool call and no useful content (empty/reasoning-
+        # only/no-reply after retries). Recording that as success=True is a
+        # fail-open the second live trial caught when the free model returned
+        # empty content after exhausting retries: Hermes marked the turn done
+        # with final_response="⚠️ No reply..." and no tool_calls, so the
+        # remediator would have recorded a successful remediation that did
+        # nothing. Return a FAILED Result so the engine escalates.
+        return Result(
+            success=False,
+            summary=(
+                "hermes turn produced no tool call and no actionable response "
+                f"(model returned empty/no-reply): {run_result.final_response[:120]}"
+            ),
+        )
+    return Result(success=True, summary=run_result.final_response[:200] or "hermes ran")
+
+
+def _was_noop(run_result: HermesRunResult) -> bool:
+    """True if the run neither called a tool nor produced usable content.
+
+    A turn with no ``tool_calls`` anywhere in the message history and a
+    final_response that is empty or Hermes's empty/no-reply marker did nothing
+    toward remediation. (Hermes sets ``final_response = "(empty)"`` or a
+    "⚠️ No reply..." string when the model returns no content after retries.)
+    """
+    has_tool_call = any(
+        isinstance(m, dict) and isinstance(m.get("tool_calls"), list) and m["tool_calls"]
+        for m in run_result.messages
+    )
+    if has_tool_call:
+        return False
+    final = (run_result.final_response or "").strip()
+    if not final:
+        return True
+    return final.startswith("(empty)") or "No reply" in final or "no content" in final.lower()
 
 
 def _serialize_history(messages: list[dict[str, Any]]) -> str:

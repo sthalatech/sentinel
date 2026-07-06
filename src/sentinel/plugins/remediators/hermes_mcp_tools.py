@@ -92,6 +92,7 @@ def _refuse(action: str, reason: str) -> Callable[..., str]:
 
 def reconcile_table_write_backend(
     targets_by_table: dict[str, Any],
+    valid_row_ids_by_table: dict[str, dict[str, str]] | None = None,
 ) -> Operation:
     """Return a narrow handler that reconciles one row of a known target table.
 
@@ -103,6 +104,18 @@ def reconcile_table_write_backend(
     a shell command or arbitrary SQL. ``targets_by_table`` maps table name to a
     ``DataSource``-with-``write_row`` (e.g. ``SqliteTableSource``) for the live
     DB being reconciled.
+
+    ``valid_row_ids_by_table`` (optional) maps table name to ``{row_id:
+    canonical_expected}`` for the current incident's mismatches — the only
+    (row_id, expected) pairs a reconcile call should write. When supplied, the
+    handler refuses BEFORE the write if either (a) ``row_id`` is not one of the
+    mismatched rows (listing the valid ids), or (b) ``expected`` does not match
+    the canonical expected value for that row_id (listing the valid value). The
+    first trial showed a real model can hallucinate a row_id; the second showed
+    it can also write a WRONG expected value to a VALID row_id ("shipped SDR"
+    instead of "shipped"), which the handler would have accepted and recorded as
+    success. Refusing up front with the valid pair collapses both to one
+    correction instead of a corrupted write or a blind retry.
     """
 
     def _h(args: Any | None = None, **kwargs: Any) -> str:
@@ -113,12 +126,16 @@ def reconcile_table_write_backend(
         if isinstance(args, dict):
             a.update(args)
         a.update(kwargs)
-        return _reconcile_one(targets_by_table, a)
+        return _reconcile_one(targets_by_table, valid_row_ids_by_table or {}, a)
 
     return _h
 
 
-def _reconcile_one(targets_by_table: dict[str, Any], a: dict[str, Any]) -> str:
+def _reconcile_one(
+    targets_by_table: dict[str, Any],
+    valid_by_table: dict[str, dict[str, str]],
+    a: dict[str, Any],
+) -> str:
     """Validate one reconcile call and apply it to the registered target."""
     # Validate the exact narrow contract at the handler boundary too, so a
     # malformed call is refused even if it bypassed the tool schema.
@@ -130,15 +147,49 @@ def _reconcile_one(targets_by_table: dict[str, Any], a: dict[str, Any]) -> str:
     source = targets_by_table.get(table)
     if source is None:
         return f"reconcile_table_write: refused; table {table!r} not registered"
+    valid = valid_by_table.get(table)
+    if valid is not None:
+        refusal = _validate_against_mismatch_set(table, row_id, expected, valid)
+        if refusal is not None:
+            return refusal
     try:
         changed = source.write_row(row_id, expected)
     except Exception as exc:  # noqa: BLE001 - surface the failure, never raise
         return f"reconcile_table_write: failed for {table}:{row_id}: {exc}"
     if changed <= 0:
-        # No row matched row_id (e.g. a hallucinated id). Tell the model so it
+        # No row matched row_id in the target DB (e.g. an id that was valid at
+        # incident time but the row was since deleted). Tell the model so it
         # retries with the right id rather than believing the fix landed.
         return f"reconcile_table_write: no row matched {table}:{row_id}; nothing changed"
     return f"reconcile_table_write: reconciled {table}:{row_id}"
+
+
+def _validate_against_mismatch_set(
+    table: str, row_id: str, expected: str, valid: dict[str, str]
+) -> str | None:
+    """Refuse a (row_id, expected) not in the incident's mismatch set, or None.
+
+    Returns a refusal string if the call should be rejected before writing (with
+    the valid ids/values listed as the correction path), else None to proceed.
+    Catches both a hallucinated row_id (first-trial finding #3) and a wrong
+    expected value on a valid row_id (second-trial finding #6: the model wrote
+    "shipped SDR" instead of "shipped").
+    """
+    if row_id not in valid:
+        ids = ", ".join(sorted(valid)) or "(none)"
+        return (
+            f"reconcile_table_write: refused; row_id {row_id!r} is not one of "
+            f"the mismatched rows for table {table!r}. Valid row_ids: {ids}. "
+            f"Call again with one of those."
+        )
+    want = valid[row_id]
+    if expected != want:
+        return (
+            f"reconcile_table_write: refused; expected {expected!r} does not "
+            f"match the canonical expected value {want!r} for {table}:{row_id}. "
+            f"Call again with expected={want!r}."
+        )
+    return None
 
 
 #: Default narrow specs for every governance remediation action. Each tool's
@@ -264,40 +315,48 @@ def toolsets_for_actions(actions: list[str]) -> list[str]:
     return [toolset_for(a) for a in actions]
 
 
-def wire_backend(action: str, operation: Operation) -> ActionToolSpec:
-    """Return a new spec for ``action`` whose handler delegates to ``operation``."""
-    base = default_specs[action]
-    return ActionToolSpec(
-        action=base.action, description=base.description, schema=base.schema, handler=operation
-    )
-
-
 def build_spec_set(
     reconcile_targets_by_table: dict[str, Any] | None = None,
+    reconcile_valid_row_ids_by_table: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, ActionToolSpec]:
     """Return the full action spec set with real backends wired where supplied.
 
     This is the wiring point a real run uses (instead of ``default_specs``
     unmodified): it starts from the narrow per-action ``default_specs`` and, for
     ``reconcile_table_write``, replaces the fail-closed ``_refuse`` placeholder
-    with ``reconcile_table_write_backend(targets_by_table)`` so the tool actually
-    writes to the target DB via the SQLite abstraction. Other actions keep their
+    with ``reconcile_table_write_backend(targets_by_table, valid_by_table)``
+    so the tool actually writes to the target DB via the SQLite abstraction AND
+    refuses a row_id/expected pair that is not one of the current incident's
+    mismatches (listing the valid ids/values). Other actions keep their
     ``_refuse`` placeholder until their own backends are supplied; the set still
     imports and registers cleanly.
 
     ``reconcile_targets_by_table`` maps table name -> ``DataSource``-with-
     ``write_row`` (e.g. ``SqliteTableSource``) for the live DB being reconciled.
-    ``None`` (default) leaves the placeholder in place — fail closed, never a
-    silent no-op — so a caller that forgets to supply targets gets the same
-    explicit refusal as before, not a handler that pretends to succeed.
+    ``reconcile_valid_row_ids_by_table`` maps table name -> ``{row_id:
+    canonical_expected}`` for the current incident's mismatches (the only
+    (row_id, expected) pairs a reconcile call should write). ``None`` (default)
+    leaves the placeholder in place — fail closed, never a silent no-op — so a
+    caller that forgets to supply targets gets the same explicit refusal as
+    before, not a handler that pretends to succeed.
     """
     spec_set = dict(default_specs)
     if reconcile_targets_by_table is not None:
         spec_set["reconcile_table_write"] = wire_backend(
             "reconcile_table_write",
-            reconcile_table_write_backend(reconcile_targets_by_table),
+            reconcile_table_write_backend(
+                reconcile_targets_by_table, reconcile_valid_row_ids_by_table
+            ),
         )
     return spec_set
+
+
+def wire_backend(action: str, operation: Operation) -> ActionToolSpec:
+    """Return a new spec for ``action`` whose handler delegates to ``operation``."""
+    base = default_specs[action]
+    return ActionToolSpec(
+        action=base.action, description=base.description, schema=base.schema, handler=operation
+    )
 
 
 class HermesAIAgentClient:
@@ -329,8 +388,16 @@ class HermesAIAgentClient:
         tool_allowlist: set[str] | None,
         skip_memory: bool,
         conversation_history: list[dict[str, Any]] | None,
+        timeout_s: float | None = None,
     ) -> Any:
-        """Run one headless turn under a per-tool-name invoke-time allowlist."""
+        """Run one headless turn under a per-tool-name invoke-time allowlist.
+
+        Bounded by ``timeout_s`` via a worker-thread join (Hermes's
+        ``run_conversation`` has no native cancel); see ``_resolve_run_result``
+        for the timeout/abort/fail-open handling and the cross-thread caveat.
+        """
+        import threading
+
         from hermes_cli.plugins import (  # type: ignore[import-not-found]
             clear_thread_tool_whitelist,
             set_thread_tool_whitelist,
@@ -340,16 +407,52 @@ class HermesAIAgentClient:
             self._agent = self._agent_factory()
         if tool_allowlist is not None:
             set_thread_tool_whitelist(tool_allowlist)
-        try:
-            result = self._agent.run_conversation(
-                user_message=message,
-                conversation_history=conversation_history,
-            )
-        finally:
-            if tool_allowlist is not None:
-                clear_thread_tool_whitelist()
-        final = str(result.get("response") or result.get("final_response") or "")
-        messages = list(result.get("messages") or [])
-        from sentinel.plugins.remediators.hermes import HermesRunResult
+        box: dict[str, Any] = {}
+        worker = threading.Thread(
+            target=_run_conversation_into,
+            args=(self._agent, message, conversation_history, box),
+            daemon=True,
+        )
+        worker.start()
+        worker.join(timeout_s)
+        if tool_allowlist is not None:
+            clear_thread_tool_whitelist()
+        return _resolve_run_result(box, worker.is_alive(), timeout_s)
 
-        return HermesRunResult(final_response=final, messages=messages)
+
+def _run_conversation_into(
+    agent: Any, message: str, history: list[dict[str, Any]] | None, box: dict[str, Any]
+) -> None:
+    """Run one Hermes turn, capturing result/exception into ``box`` for the caller."""
+    try:
+        box["result"] = agent.run_conversation(user_message=message, conversation_history=history)
+    except BaseException as exc:  # noqa: BLE001 - surface every failure to the caller
+        box["exc"] = exc
+
+
+def _resolve_run_result(box: dict[str, Any], timed_out: bool, timeout_s: float | None) -> Any:
+    """Turn the worker's captured box into a HermesRunResult or raise.
+
+    Raises ``TimeoutError`` if the worker is still alive (turn did not return in
+    ``timeout_s``), re-raises any exception the worker captured, raises
+    ``RuntimeError`` for a non-retryable abort (Hermes marks those
+    ``completed=False`` / ``failed=True`` with the error in ``final_response`` —
+    treating that as a normal result would record a provider billing failure as
+    success=True, a fail-open the second live trial caught on HTTP 402), else
+    builds the HermesRunResult from the completed turn.
+    """
+    from sentinel.plugins.remediators.hermes import HermesRunResult
+
+    if timed_out:
+        raise TimeoutError(f"hermes run_conversation did not return within {timeout_s}s")
+    if box.get("exc") is not None:
+        raise box["exc"]
+    result = box.get("result") or {}
+    if result.get("completed") is False or result.get("failed") is True:
+        err = str(
+            result.get("error") or result.get("final_response") or "hermes run did not complete"
+        )
+        raise RuntimeError(f"hermes run aborted (not completed): {err}")
+    final = str(result.get("response") or result.get("final_response") or "")
+    messages = list(result.get("messages") or [])
+    return HermesRunResult(final_response=final, messages=messages)

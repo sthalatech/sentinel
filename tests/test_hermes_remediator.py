@@ -129,8 +129,15 @@ class FakeClient:
         tool_allowlist: set[str] | None,
         skip_memory: bool,
         conversation_history: list[dict[str, Any]] | None,
+        timeout_s: float | None = None,
     ) -> HermesRunResult:
-        """Record the call and, if simulating dispatch, run the real handlers."""
+        """Record the call and, if simulating dispatch, run the real handlers.
+
+        ``timeout_s`` is accepted to match the real ``HermesClient.run`` contract
+        (HermesRemediator passes its per-incident bound) but not enforced here —
+        the fake is synchronous and never hangs; the timeout behavior is tested
+        directly against a fake that sleeps.
+        """
         self.calls.append(
             {
                 "message": message,
@@ -138,6 +145,7 @@ class FakeClient:
                 "tool_allowlist": set(tool_allowlist) if tool_allowlist else None,
                 "skip_memory": skip_memory,
                 "conversation_history": conversation_history,
+                "timeout_s": timeout_s,
             }
         )
         if not self.tool_calls_to_simulate:
@@ -830,3 +838,387 @@ def test_audit_fail_closed_when_denied_call_has_no_matching_result() -> None:
         # no tool result for call_9
     ]
     assert _tool_call_violations(messages, set()) == {"terminal"}
+
+
+# ---------------------------------------------------------------------------
+# Second-live-trial hardening: (1) per-incident timeout under 90s that returns
+# a Result (not a raw exception) so the engine's attempts/escalation path
+# handles it; (2) refuse a hallucinated row_id against the incident's mismatch
+# set and list the valid ids. Both are validated against a REAL Hermes instance
+# + real model in scripts/live_hermes_trial.py (second trial). These unit tests
+# pin the contract the live run depends on.
+# ---------------------------------------------------------------------------
+
+
+def test_run_timeout_under_90s_is_default_and_enforced() -> None:
+    """The default per-incident timeout is under 90s, and __init__ refuses any
+    value >= 90 or <= 0 — a hung model call must never hold the tick open."""
+    from sentinel.plugins.remediators.hermes import DEFAULT_RUN_TIMEOUT_S, HermesRefusedError
+
+    assert 0 < DEFAULT_RUN_TIMEOUT_S < 90
+    _reg, client = _fresh_registry()
+    # >= 90 is refused.
+    for bad in (90, 120, 0, -1):
+        try:
+            HermesRemediator(
+                _make_factory(client),
+                _FixedEnforcer(["restart_workflow"]),
+                _FixedTrust("A4"),
+                docker_check=_docker_ok,
+                config_loader=_config_docker,
+                run_timeout_s=float(bad),
+            )
+            raise AssertionError(f"expected refusal for run_timeout_s={bad}")
+        except HermesRefusedError as exc:
+            assert "run_timeout_s" in str(exc)
+
+
+def test_timeout_returns_result_not_raise() -> None:
+    """A client.run that raises TimeoutError is converted to a FAILED Result —
+    never a raw exception — so core/engine.py's attempts/escalation path handles
+    a hang (verify stays False -> demote/escalate), and the tick never crashes.
+    """
+    _reg, client = _fresh_registry()
+
+    class _HangClient:
+        def list_tools(self, enabled_toolsets: list[str]) -> list[str]:
+            return self.registrar.tools_for(enabled_toolsets)
+
+        def run(
+            self,
+            message,
+            *,
+            enabled_toolsets,
+            tool_allowlist,
+            skip_memory,
+            conversation_history,
+            timeout_s,
+        ):
+            raise TimeoutError("hung")
+
+        registrar = _reg
+
+    rem = HermesRemediator(
+        lambda: _HangClient(),
+        _FixedEnforcer(["restart_workflow"]),
+        _FixedTrust("A4"),
+        docker_check=_docker_ok,
+        config_loader=_config_docker,
+    )
+    result = rem.remediate(_make_incident(), rem._enforcer)  # noqa: SLF001
+    assert result.success is False
+    assert result.breach is False
+    assert "timed out" in result.summary
+
+
+def test_real_client_run_thread_timeout_raises_timeout_error() -> None:
+    """The real HermesAIAgentClient.run raises TimeoutError when run_conversation
+    exceeds timeout_s (thread-join based, since run_conversation has no native
+    cancel). This is what remediate() catches and turns into a Result. Skipped
+    where hermes_cli isn't installed (CI); exercised for real in the live trial."""
+    import importlib
+    import time as _time
+
+    try:
+        importlib.import_module("hermes_cli")
+    except ImportError:
+        import pytest
+
+        pytest.skip("hermes_cli not installed (CI); live-trial covers this")
+
+    from sentinel.plugins.remediators.hermes_mcp_tools import HermesAIAgentClient
+
+    class _SlowAgent:
+        def run_conversation(self, *, user_message, conversation_history):
+            _time.sleep(2.0)
+            return {"response": "late", "messages": []}
+
+    client = HermesAIAgentClient(lambda: _SlowAgent())
+    try:
+        client.run(
+            "x",
+            enabled_toolsets=[],
+            tool_allowlist=None,
+            skip_memory=True,
+            conversation_history=None,
+            timeout_s=0.2,
+        )
+        raise AssertionError("expected TimeoutError")
+    except TimeoutError as exc:
+        assert "0.2s" in str(exc)
+
+
+def test_reconcile_refuses_hallucinated_row_id_lists_valid_ids() -> None:
+    """Fix 3: a row_id not in the incident's mismatch set is refused BEFORE the
+    write, with the valid row_ids listed — a real correction path, not a blind
+    'nothing changed'. First trial's model hallucinated row_id='ضغط' and got a
+    no-op; this collapses the correction to one turn."""
+    from sentinel.plugins.datasource import SqliteTableSource
+    from sentinel.plugins.remediators.hermes_mcp_tools import build_spec_set
+
+    conn = sqlite3.connect(":memory:")
+    with conn:
+        conn.execute("CREATE TABLE orders (id TEXT PRIMARY KEY, status TEXT)")
+        conn.executemany("INSERT INTO orders VALUES (?,?)", [("o1", "paid"), ("o2", "paid")])
+    targets = {"orders": SqliteTableSource(conn, "orders", "id")}
+    valid = {"orders": {"o2": "shipped"}}  # row_id -> canonical expected
+    spec = build_spec_set(targets, valid)
+    # Real dispatch shape (positional dict). A hallucinated id is refused.
+    out = spec["reconcile_table_write"].handler(
+        {"table": "orders", "row_id": "o99", "expected": "shipped"}
+    )
+    assert "refused" in out, out
+    assert "o2" in out, out  # valid id listed
+    assert "o99" in out, out
+    # And nothing was written.
+    assert conn.execute("SELECT status FROM orders WHERE id='o2'").fetchone()[0] == "paid"
+    conn.close()
+
+
+def test_reconcile_accepts_valid_row_id_writes_it() -> None:
+    """A row_id that IS in the mismatch set is written normally."""
+    from sentinel.plugins.datasource import SqliteTableSource
+    from sentinel.plugins.remediators.hermes_mcp_tools import build_spec_set
+
+    conn = sqlite3.connect(":memory:")
+    with conn:
+        conn.execute("CREATE TABLE orders (id TEXT PRIMARY KEY, status TEXT)")
+        conn.execute("INSERT INTO orders VALUES ('o2','paid')")
+    targets = {"orders": SqliteTableSource(conn, "orders", "id")}
+    valid = {"orders": {"o2": "shipped"}}
+    spec = build_spec_set(targets, valid)
+    out = spec["reconcile_table_write"].handler(
+        {"table": "orders", "row_id": "o2", "expected": "shipped"}
+    )
+    assert "reconciled" in out, out
+    assert conn.execute("SELECT status FROM orders WHERE id='o2'").fetchone()[0] == "shipped"
+    conn.close()
+
+
+def test_reconcile_no_valid_set_falls_back_to_write_rowcount_guard() -> None:
+    """Without a valid_row_ids set wired, the handler still guards via write_row
+    rowcount (back-compat for callers that wire targets but not the mismatch
+    set)."""
+    from sentinel.plugins.datasource import SqliteTableSource
+    from sentinel.plugins.remediators.hermes_mcp_tools import build_spec_set
+
+    conn = sqlite3.connect(":memory:")
+    with conn:
+        conn.execute("CREATE TABLE orders (id TEXT PRIMARY KEY, status TEXT)")
+        conn.execute("INSERT INTO orders VALUES ('o2','paid')")
+    spec = build_spec_set({"orders": SqliteTableSource(conn, "orders", "id")})
+    out = spec["reconcile_table_write"].handler(
+        {"table": "orders", "row_id": "missing", "expected": "shipped"}
+    )
+    assert "no row matched" in out, out
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Second-live-trial finding #4: HTTP 402 (provider billing/credits exhausted)
+# aborts the Hermes turn with completed=False/failed=True and the error in
+# final_response. The real client must raise on that shape (not return it as a
+# successful result) so remediate() records a FAILED Result — otherwise a
+# billing failure is silently recorded as success=True (fail-open). The live
+# trial caught this when the OpenRouter account hit 402 mid-run.
+# ---------------------------------------------------------------------------
+
+
+def test_abort_returns_failed_result_not_success() -> None:
+    """A client.run that raises RuntimeError (Hermes aborted: 402/401/content
+    policy/max-retries) is converted to a FAILED Result, never success=True and
+    never a raw exception — so the engine's attempts/escalation path handles a
+    provider billing failure instead of the tick crashing or recording a fake
+    success."""
+    _reg, client = _fresh_registry()
+
+    class _AbortClient:
+        def list_tools(self, enabled_toolsets: list[str]) -> list[str]:
+            return self.registrar.tools_for(enabled_toolsets)
+
+        def run(
+            self,
+            message,
+            *,
+            enabled_toolsets,
+            tool_allowlist,
+            skip_memory,
+            conversation_history,
+            timeout_s,
+        ):
+            raise RuntimeError("hermes run aborted (not completed): HTTP 402 credits")
+
+        registrar = _reg
+
+    rem = HermesRemediator(
+        lambda: _AbortClient(),
+        _FixedEnforcer(["restart_workflow"]),
+        _FixedTrust("A4"),
+        docker_check=_docker_ok,
+        config_loader=_config_docker,
+    )
+    result = rem.remediate(_make_incident(), rem._enforcer)  # noqa: SLF001
+    assert result.success is False
+    assert result.breach is False
+    assert "aborted" in result.summary
+    assert "402" in result.summary
+
+
+def test_real_client_raises_on_completed_false_abort() -> None:
+    """The real HermesAIAgentClient.run raises RuntimeError when run_conversation
+    returns completed=False / failed=True (non-retryable abort), instead of
+    returning the error string as a successful HermesRunResult. Skipped where
+    hermes_cli isn't installed (CI); exercised for real in the live trial."""
+    import importlib
+
+    try:
+        importlib.import_module("hermes_cli")
+    except ImportError:
+        import pytest
+
+        pytest.skip("hermes_cli not installed (CI); live-trial covers this")
+
+    from sentinel.plugins.remediators.hermes_mcp_tools import HermesAIAgentClient
+
+    class _AbortAgent:
+        def run_conversation(self, *, user_message, conversation_history):
+            return {
+                "final_response": "HTTP 402: credits exhausted",
+                "messages": [],
+                "completed": False,
+                "failed": True,
+                "error": "HTTP 402: credits exhausted",
+            }
+
+    client = HermesAIAgentClient(lambda: _AbortAgent())
+    try:
+        client.run(
+            "x",
+            enabled_toolsets=[],
+            tool_allowlist=None,
+            skip_memory=True,
+            conversation_history=None,
+            timeout_s=10.0,
+        )
+        raise AssertionError("expected RuntimeError on completed=False abort")
+    except RuntimeError as exc:
+        assert "aborted" in str(exc)
+        assert "402" in str(exc)
+
+
+# ---------------------------------------------------------------------------
+# Second-live-trial finding #5: the free model returned EMPTY content after
+# exhausting retries ("No fallback providers configured"). Hermes marked that
+# turn done with final_response="⚠️ No reply..." and NO tool_calls. The
+# remediator would have recorded success=True for a turn that did nothing — a
+# fail-open. A no-tool-call + empty/no-reply turn must be a FAILED Result.
+# ---------------------------------------------------------------------------
+
+
+def test_noop_empty_response_returns_failed_result_not_success() -> None:
+    """A turn with no tool_calls and an empty final_response is a no-op, not a
+    success — the engine must escalate, not record a fake successful fix."""
+    _reg, client = _fresh_registry()
+    client.run_result = HermesRunResult(
+        final_response="", messages=[{"role": "assistant", "content": ""}]
+    )
+    rem = HermesRemediator(
+        _make_factory(client),
+        _FixedEnforcer(["restart_workflow"]),
+        _FixedTrust("A4"),
+        docker_check=_docker_ok,
+        config_loader=_config_docker,
+    )
+    result = rem.remediate(_make_incident(), rem._enforcer)  # noqa: SLF001
+    assert result.success is False
+    assert result.breach is False
+    assert "no tool call" in result.summary
+
+
+def test_noop_hermes_no_reply_marker_returns_failed_result() -> None:
+    """Hermes's 'No reply' marker (empty content after retries) is a no-op."""
+    _reg, client = _fresh_registry()
+    client.run_result = HermesRunResult(
+        final_response="⚠️ No reply: the model returned empty content after retries.",
+        messages=[{"role": "assistant", "content": ""}],
+    )
+    rem = HermesRemediator(
+        _make_factory(client),
+        _FixedEnforcer(["restart_workflow"]),
+        _FixedTrust("A4"),
+        docker_check=_docker_ok,
+        config_loader=_config_docker,
+    )
+    result = rem.remediate(_make_incident(), rem._enforcer)  # noqa: SLF001
+    assert result.success is False
+    assert result.breach is False
+
+
+def test_real_response_with_tool_call_is_still_success() -> None:
+    """A turn that called an allowed tool and produced content is a real success
+    (the noop guard must not false-positive on a normal turn)."""
+    _reg, client = _fresh_registry()
+    client.run_result = HermesRunResult(
+        final_response="restarted workflow w-1",
+        messages=[
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {
+                            "name": "restart_workflow",
+                            "arguments": '{"workflow_id":"w-1"}',
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "restarted"},
+        ],
+    )
+    rem = HermesRemediator(
+        _make_factory(client),
+        _FixedEnforcer(["restart_workflow"]),
+        _FixedTrust("A4"),
+        docker_check=_docker_ok,
+        config_loader=_config_docker,
+    )
+    result = rem.remediate(_make_incident(), rem._enforcer)  # noqa: SLF001
+    assert result.success is True
+    assert result.breach is False
+
+
+# ---------------------------------------------------------------------------
+# Second-live-trial finding #6: the model wrote a WRONG expected value
+# ("shipped SDR") to a VALID row_id ("o2"); the handler accepted it (row_id was
+# in the mismatch set, expected was a string) and the remediator recorded
+# success=True, but verify()=False because "shipped SDR" != "shipped". The
+# handler must refuse an expected that does not match the canonical value.
+# ---------------------------------------------------------------------------
+
+
+def test_reconcile_refuses_wrong_expected_for_valid_row_id() -> None:
+    """A valid row_id with a WRONG expected value is refused before the write,
+    with the canonical expected stated — so the model corrects in one turn
+    instead of corrupting the row (second-trial finding #6)."""
+    from sentinel.plugins.datasource import SqliteTableSource
+    from sentinel.plugins.remediators.hermes_mcp_tools import build_spec_set
+
+    conn = sqlite3.connect(":memory:")
+    with conn:
+        conn.execute("CREATE TABLE orders (id TEXT PRIMARY KEY, status TEXT)")
+        conn.execute("INSERT INTO orders VALUES ('o2','paid')")
+    targets = {"orders": SqliteTableSource(conn, "orders", "id")}
+    valid = {"orders": {"o2": "shipped"}}  # canonical expected is "shipped"
+    spec = build_spec_set(targets, valid)
+    out = spec["reconcile_table_write"].handler(
+        {"table": "orders", "row_id": "o2", "expected": "shipped SDR"}
+    )
+    assert "refused" in out, out
+    assert "shipped" in out, out  # canonical value stated
+    assert "shipped SDR" in out, out
+    # And the row was NOT corrupted.
+    assert conn.execute("SELECT status FROM orders WHERE id='o2'").fetchone()[0] == "paid"
+    conn.close()
